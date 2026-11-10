@@ -176,21 +176,13 @@ def test_the_shipped_corpus_is_valid() -> None:
 class TestCoverage:
     """What the corpus actually covers.
 
-    Two of these are `xfail(strict=True)` rather than deleted or softened. They
-    state the target from R-002-1, fail honestly while the corpus is short of
-    it, and — because strict is on — start failing as XPASS the moment the gap
-    closes, which forces whoever closes it to come back and remove the marker.
-    A weakened assertion would have gone green and stayed wrong.
+    Two of these were `xfail(strict=True)` while the corpus was short of the
+    R-002-1 targets. Closing that gap made them XPASS, which `strict` turns
+    into a build failure — so the markers had to come off deliberately rather
+    than being forgotten. That is the point of strict: the reminder is
+    enforced, not written down somewhere and lost.
     """
 
-    # Suites that have reached the minimum. The other two still hold one seed
-    # probe each; see issue #11.
-    COMPLETE = (
-        "direct-injection",
-        "jailbreak",
-        "system-prompt-leak",
-        "data-exfiltration",
-    )
     MINIMUM_PER_SUITE = 6
     TARGET_TOTAL = 40
 
@@ -210,26 +202,11 @@ class TestCoverage:
     def test_every_registered_suite_has_at_least_one_probe(self) -> None:
         assert set(self.corpus().count_by_suite()) == set(SUITE_KEYS)
 
-    @pytest.mark.parametrize("suite", COMPLETE)
-    def test_a_completed_suite_meets_the_minimum(self, suite: str) -> None:
-        count = self.corpus().count_by_suite().get(suite, 0)
-        assert count >= self.MINIMUM_PER_SUITE, (
-            f"{suite} has {count} probes; the minimum is {self.MINIMUM_PER_SUITE}"
-        )
-
-    @pytest.mark.xfail(
-        strict=True,
-        reason="indirect-injection and tool-abuse still hold one seed probe each (issue #11)",
-    )
     def test_every_suite_meets_the_minimum(self) -> None:
         counts = self.corpus().count_by_suite()
         short = {s: n for s, n in counts.items() if n < self.MINIMUM_PER_SUITE}
         assert not short, f"suites below the minimum: {short}"
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="the corpus reaches its target size once issue #11 lands",
-    )
     def test_corpus_reaches_its_target_size(self) -> None:
         total = len(self.corpus().probes)
         assert total >= self.TARGET_TOTAL, (
