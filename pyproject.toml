@@ -1,0 +1,58 @@
+[project]
+name = "promptproof"
+version = "0.1.0"
+description = "Adversarial testing for LLM system prompts"
+requires-python = ">=3.12"
+dependencies = [
+    "promptproof-core",
+    "promptproof-api",
+    "promptproof-worker",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.4",
+    "pytest-asyncio>=0.25.0",
+    "ruff>=0.8.4",
+    "mypy>=1.14.0",
+    "types-pyyaml>=6.0.12.20261103",
+]
+
+[tool.uv.workspace]
+members = ["packages/core", "apps/api", "apps/worker"]
+
+[tool.uv.sources]
+promptproof-core = { workspace = true }
+promptproof-api = { workspace = true }
+promptproof-worker = { workspace = true }
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "S", "RUF"]
+ignore = ["S101"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S105", "S106"]
+# The tracker seed script is mostly issue prose, and its subprocess calls use a
+# fixed executable with constructed argument lists.
+"scripts/**" = ["E501", "S603", "RUF001"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["alembic.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+# A warning we have not decided about is a defect we have not noticed yet.
+filterwarnings = ["error"]

@@ -53,8 +53,15 @@ LABELS: list[tuple[str, str, str]] = [
 SPEC_URL = "https://github.com/Amar-Ag/promptproof/blob/main/docs/specs"
 
 
-def body(spec: str, req: str, behaviour: str, criteria: list[str],
-         role: str, deps: str = "None", out_of_scope: str = "") -> str:
+def body(
+    spec: str,
+    req: str,
+    behaviour: str,
+    criteria: list[str],
+    role: str,
+    deps: str = "None",
+    out_of_scope: str = "",
+) -> str:
     checks = "\n".join(f"- [ ] {c}" for c in criteria)
     oos = out_of_scope or "Anything not listed in the acceptance criteria above."
     return f"""## Spec
@@ -89,7 +96,8 @@ ISSUES: list[dict] = [
         title="Compose stack and Makefile: web, api, worker, db start with one command",
         labels=["phase:1-skeleton", "role:sre", "spec:operability"],
         body=body(
-            "004-operability.md", "R-004-1",
+            "004-operability.md",
+            "R-004-1",
             "`make up` builds and starts all four services, applies migrations, and waits for "
             "real readiness. A reviewer with only Docker installed gets a working stack from a "
             "clean clone.",
@@ -110,7 +118,8 @@ ISSUES: list[dict] = [
         title="Schema and migrations for target families, targets, scans, findings",
         labels=["phase:1-skeleton", "role:backend-engineer", "spec:targets"],
         body=body(
-            "001-targets.md", "R-001-3",
+            "001-targets.md",
+            "R-001-3",
             "The initial Alembic migration creating the four tables with the constraints and "
             "indexes the architecture specifies.",
             [
@@ -130,7 +139,8 @@ ISSUES: list[dict] = [
         title="Create and list prompt targets",
         labels=["phase:1-skeleton", "role:backend-engineer", "spec:targets"],
         body=body(
-            "001-targets.md", "R-001-1",
+            "001-targets.md",
+            "R-001-1",
             "`POST /api/targets` registers a system prompt plus a model as version 1 of a new "
             "target family. `GET` endpoints list and retrieve them.",
             [
@@ -151,7 +161,8 @@ ISSUES: list[dict] = [
         title="Version a target immutably",
         labels=["phase:1-skeleton", "role:backend-engineer", "spec:targets"],
         body=body(
-            "001-targets.md", "R-001-3",
+            "001-targets.md",
+            "R-001-3",
             "Editing a target inserts a new row in the same family with version + 1. Existing "
             "versions are never mutated or deleted.",
             [
@@ -171,7 +182,8 @@ ISSUES: list[dict] = [
         title="Submit a scan: validate, enqueue, capture trace context",
         labels=["phase:1-skeleton", "role:backend-engineer", "spec:scanning"],
         body=body(
-            "002-scanning.md", "R-002-2",
+            "002-scanning.md",
+            "R-002-2",
             "`POST /api/scans` validates the target and suites, resolves suites to a probe set, "
             "writes a pending scan carrying the current trace context, and returns 202. The API "
             "makes no model call.",
@@ -191,7 +203,8 @@ ISSUES: list[dict] = [
         title="Worker claim loop: SKIP LOCKED, lease expiry, attempt limit",
         labels=["phase:1-skeleton", "role:backend-engineer", "spec:scanning"],
         body=body(
-            "002-scanning.md", "R-002-3",
+            "002-scanning.md",
+            "R-002-3",
             "The worker claims the oldest eligible scan in one statement, honours a lease, "
             "reclaims abandoned work, and fails scans that exhaust their attempts. Phase 1 may "
             "execute stub probes; real execution is a later issue.",
@@ -213,7 +226,8 @@ ISSUES: list[dict] = [
         title="Frontend shell, typed API client, target list and create form",
         labels=["phase:1-skeleton", "role:frontend-engineer", "spec:targets"],
         body=body(
-            "001-targets.md", "R-001-4",
+            "001-targets.md",
+            "R-001-4",
             "The React app, its generated API client, a target list and a create form.",
             [
                 "Target list renders distinct empty, loading and error states; an API failure "
@@ -233,7 +247,8 @@ ISSUES: list[dict] = [
         title="Scan list and live progress view",
         labels=["phase:1-skeleton", "role:frontend-engineer", "spec:reporting"],
         body=body(
-            "003-reporting.md", "R-003-1 and R-003-2",
+            "003-reporting.md",
+            "R-003-1 and R-003-2",
             "A paginated scan list, and a scan view that follows a running scan and appends "
             "findings as they land.",
             [
@@ -257,7 +272,8 @@ ISSUES: list[dict] = [
         title="Probe corpus schema, loader and validation",
         labels=["phase:2-product", "role:backend-engineer", "spec:scanning"],
         body=body(
-            "002-scanning.md", "R-002-1",
+            "002-scanning.md",
+            "R-002-1",
             "Probes are YAML under probes/<suite>/, loaded and validated at startup, with a "
             "corpus version stamped onto every scan.",
             [
@@ -277,7 +293,8 @@ ISSUES: list[dict] = [
         title="Probe corpus: direct-injection, jailbreak and system-prompt-leak suites",
         labels=["phase:2-product", "role:probe-author", "spec:scanning"],
         body=body(
-            "002-scanning.md", "R-002-1",
+            "002-scanning.md",
+            "R-002-1",
             "The first three suites, at least six probes each, each probe declaring success "
             "criteria the judge can evaluate and actionable remediation.",
             [
@@ -299,7 +316,8 @@ ISSUES: list[dict] = [
         title="Probe corpus: data-exfiltration, indirect-injection and tool-abuse suites",
         labels=["phase:2-product", "role:probe-author", "spec:scanning"],
         body=body(
-            "002-scanning.md", "R-002-1",
+            "002-scanning.md",
+            "R-002-1",
             "The remaining three suites, bringing the corpus to at least 40 probes across six "
             "suites.",
             [
@@ -318,7 +336,8 @@ ISSUES: list[dict] = [
         title="Model provider client: timeouts, bounded retry, telemetry scrubbing",
         labels=["phase:2-product", "role:backend-engineer", "spec:scanning"],
         body=body(
-            "002-scanning.md", "R-002-4",
+            "002-scanning.md",
+            "R-002-4",
             "One client in packages/core owning all model I/O, its timeouts, its bounded retry "
             "with backoff, and the scrubber. No other module calls a provider directly.",
             [
@@ -338,7 +357,8 @@ ISSUES: list[dict] = [
         title="Execute probes against a prompt target with bounded concurrency",
         labels=["phase:2-product", "role:backend-engineer", "spec:scanning"],
         body=body(
-            "002-scanning.md", "R-002-4",
+            "002-scanning.md",
+            "R-002-4",
             "The worker runs each probe against the target with at most SCAN_CONCURRENCY in "
             "flight. A failing probe never fails the scan.",
             [
@@ -359,7 +379,8 @@ ISSUES: list[dict] = [
         title="Judge verdicts: structured output, evidence, fixture tests",
         labels=["phase:2-product", "role:backend-engineer", "spec:scanning"],
         body=body(
-            "002-scanning.md", "R-002-5",
+            "002-scanning.md",
+            "R-002-5",
             "An independent judge model, from a different family than the default target, "
             "decides each probe's outcome from the probe's success criteria and stores its "
             "reasoning as evidence.",
@@ -382,7 +403,8 @@ ISSUES: list[dict] = [
         title="Grade the scan and complete it transactionally",
         labels=["phase:2-product", "role:backend-engineer", "spec:scanning"],
         body=body(
-            "002-scanning.md", "R-002-6",
+            "002-scanning.md",
+            "R-002-6",
             "When every probe has resolved, compute the grade from exploited findings using the "
             "worst-case table, write counts, and mark the scan completed.",
             [
@@ -400,7 +422,8 @@ ISSUES: list[dict] = [
         title="Report view: grade, breakdown, evidence-backed findings rendered inert",
         labels=["phase:2-product", "role:frontend-engineer", "spec:reporting"],
         body=body(
-            "003-reporting.md", "R-003-3",
+            "003-reporting.md",
+            "R-003-3",
             "The report shows the grade, a per-suite breakdown, and findings ordered exploited, "
             "errored, resisted — each expandable to payload, excerpt, rationale and remediation.",
             [
@@ -422,7 +445,8 @@ ISSUES: list[dict] = [
         title="SSRF guard and endpoint targets",
         labels=["phase:2-product", "role:backend-engineer", "spec:targets"],
         body=body(
-            "001-targets.md", "R-001-2 and R-002-7",
+            "001-targets.md",
+            "R-001-2 and R-002-7",
             "Endpoint targets, with a guard applied at registration and before every request: "
             "DNS resolved once and pinned, private ranges refused, redirects re-validated.",
             [
@@ -446,7 +470,8 @@ ISSUES: list[dict] = [
         title="Unit test suite: grading, corpus validation, scrubber, SSRF guard",
         labels=["phase:3-verify", "role:test-engineer", "spec:operability"],
         body=body(
-            "004-operability.md", "R-004-2",
+            "004-operability.md",
+            "R-004-2",
             "Pure-function coverage of the logic most likely to be wrong, with no I/O.",
             [
                 "Unit tests perform no I/O and complete in under 10 seconds",
@@ -464,7 +489,8 @@ ISSUES: list[dict] = [
         title="Integration tests: concurrency, lease, partial failure, trace propagation",
         labels=["phase:3-verify", "role:test-engineer", "spec:operability"],
         body=body(
-            "004-operability.md", "R-004-2 and R-004-5",
+            "004-operability.md",
+            "R-004-2 and R-004-5",
             "Tests against a real Postgres started by the harness, with a stubbed provider, "
             "covering the failure modes the specs call out.",
             [
@@ -486,7 +512,8 @@ ISSUES: list[dict] = [
         title="Frontend tests and the Playwright end-to-end journey",
         labels=["phase:3-verify", "role:test-engineer", "spec:operability"],
         body=body(
-            "004-operability.md", "R-004-2",
+            "004-operability.md",
+            "R-004-2",
             "Vitest coverage of component states and polling behaviour, plus one Playwright "
             "journey through the whole product against the Compose stack.",
             [
@@ -507,7 +534,8 @@ ISSUES: list[dict] = [
         title="CI: lint, type check and all test suites on every pull request",
         labels=["phase:4-ship", "role:sre", "spec:operability"],
         body=body(
-            "004-operability.md", "R-004-3",
+            "004-operability.md",
+            "R-004-3",
             "A GitHub Actions workflow gating merge on lint, types and tests.",
             [
                 "Triggers on pull_request and on push to main",
@@ -524,7 +552,8 @@ ISSUES: list[dict] = [
         title="CD: automatic dev deploy, gated production deploy, rollback drill",
         labels=["phase:4-ship", "role:sre", "spec:operability"],
         body=body(
-            "004-operability.md", "R-004-4",
+            "004-operability.md",
+            "R-004-4",
             "Merging to main deploys to promptproof-dev automatically. Production is a separate, "
             "manually triggered, approval-gated workflow. Rollback is exercised for real.",
             [
@@ -545,7 +574,8 @@ ISSUES: list[dict] = [
         title="OpenTelemetry tracing across the API and worker boundary",
         labels=["phase:5-operate", "role:sre", "spec:operability"],
         body=body(
-            "004-operability.md", "R-004-5",
+            "004-operability.md",
+            "R-004-5",
             "One trace per scan, spanning both processes, joined through the W3C context "
             "persisted on scans.traceparent.",
             [
@@ -564,7 +594,8 @@ ISSUES: list[dict] = [
         title="Metrics, structured logs and enforced scrubbing",
         labels=["phase:5-operate", "role:sre", "spec:operability"],
         body=body(
-            "004-operability.md", "R-004-5",
+            "004-operability.md",
+            "R-004-5",
             "The metric set and structured logging from docs/observability.md, with scrubbing "
             "enforced by a test rather than by intention.",
             [
@@ -584,7 +615,8 @@ ISSUES: list[dict] = [
         title="Alerts on user impact: stalled queue and elevated failure rate",
         labels=["phase:5-operate", "role:sre", "spec:operability"],
         body=body(
-            "004-operability.md", "R-004-6",
+            "004-operability.md",
+            "R-004-6",
             "Two alerts, both on user-visible symptoms, each linked to exactly one runbook, each "
             "fired deliberately once.",
             [
@@ -604,7 +636,8 @@ ISSUES: list[dict] = [
         title="On-call responder agent: diagnose from the runbook, remediate, file an issue",
         labels=["phase:5-operate", "role:sre", "spec:operability"],
         body=body(
-            "004-operability.md", "R-004-7",
+            "004-operability.md",
+            "R-004-7",
             "A PydanticAI agent on Groq, triggered by the alert webhook, which follows the "
             "matching runbook, applies only AGENT-marked remediations, and files an issue on "
             "every run.",
@@ -630,7 +663,8 @@ ISSUES: list[dict] = [
         title="Compare two scans of one target family",
         labels=["phase:6-later", "role:backend-engineer", "spec:reporting"],
         body=body(
-            "003-reporting.md", "R-003-4",
+            "003-reporting.md",
+            "R-003-4",
             "Given two scans of the same family with overlapping suites, show the grade change "
             "and per-probe whether each outcome improved, regressed or held.",
             [
@@ -660,9 +694,21 @@ def run(args: list[str], dry: bool) -> str:
 
 def existing_titles() -> set[str]:
     out = subprocess.run(
-        [GH, "issue", "list", "--repo", REPO, "--state", "all",
-         "--limit", "300", "--json", "title"],
-        capture_output=True, text=True,
+        [
+            GH,
+            "issue",
+            "list",
+            "--repo",
+            REPO,
+            "--state",
+            "all",
+            "--limit",
+            "300",
+            "--json",
+            "title",
+        ],
+        capture_output=True,
+        text=True,
     )
     if out.returncode != 0:
         return set()
@@ -676,8 +722,21 @@ def main() -> int:
 
     print(f"Labels ({len(LABELS)})")
     for name, color, desc in LABELS:
-        run(["label", "create", name, "--repo", REPO, "--color", color,
-             "--description", desc, "--force"], opts.dry_run)
+        run(
+            [
+                "label",
+                "create",
+                name,
+                "--repo",
+                REPO,
+                "--color",
+                color,
+                "--description",
+                desc,
+                "--force",
+            ],
+            opts.dry_run,
+        )
         print(f"  {name}")
 
     print(f"\nProject board: {PROJECT_TITLE}")
@@ -689,8 +748,16 @@ def main() -> int:
         if issue["title"] in have:
             print(f"  = {issue['title'][:70]} (exists)")
             continue
-        args = ["issue", "create", "--repo", REPO,
-                "--title", issue["title"], "--body", issue["body"]]
+        args = [
+            "issue",
+            "create",
+            "--repo",
+            REPO,
+            "--title",
+            issue["title"],
+            "--body",
+            issue["body"],
+        ]
         for label in issue["labels"]:
             args += ["--label", label]
         url = run(args, opts.dry_run)

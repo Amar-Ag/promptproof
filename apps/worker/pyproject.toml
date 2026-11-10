@@ -1,0 +1,22 @@
+[project]
+name = "promptproof-worker"
+version = "0.1.0"
+description = "promptproof scan executor"
+requires-python = ">=3.12"
+dependencies = [
+    "promptproof-core",
+    "httpx>=0.28.1",
+]
+
+[tool.uv.sources]
+promptproof-core = { workspace = true }
+
+[project.scripts]
+promptproof-worker = "promptproof_worker.main:run"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/promptproof_worker"]

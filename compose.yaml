@@ -1,0 +1,106 @@
+# The whole system, including its database. `make up` and nothing else.
+#
+# Four services: web, api, worker, db. No message broker — the `scans` table is
+# the queue (ADR-0002).
+
+name: promptproof
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-promptproof}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-promptproof}
+      POSTGRES_DB: ${POSTGRES_DB:-promptproof}
+    ports:
+      # Exposed so tests and psql can reach it from the host.
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # `pg_isready` against the actual database, not just the port: this is what
+      # api and worker gate their startup on.
+      test:
+        ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-promptproof} -d ${POSTGRES_DB:-promptproof}"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: >-
+        postgresql+asyncpg://${POSTGRES_USER:-promptproof}:${POSTGRES_PASSWORD:-promptproof}@db:5432/${POSTGRES_DB:-promptproof}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      DEFAULT_TARGET_MODEL: ${DEFAULT_TARGET_MODEL:-qwen/qwen3.6-27b}
+      JUDGE_MODEL: ${JUDGE_MODEL:-openai/gpt-oss-120b}
+      ENVIRONMENT: ${ENVIRONMENT:-local}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SSRF_ALLOW_PRIVATE: ${SSRF_ALLOW_PRIVATE:-false}
+      CORS_ALLOW_ORIGINS: '["http://localhost:5173"]'
+      LOGFIRE_TOKEN: ${LOGFIRE_TOKEN:-}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/readyz"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["promptproof-worker"]
+    environment:
+      DATABASE_URL: >-
+        postgresql+asyncpg://${POSTGRES_USER:-promptproof}:${POSTGRES_PASSWORD:-promptproof}@db:5432/${POSTGRES_DB:-promptproof}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      DEFAULT_TARGET_MODEL: ${DEFAULT_TARGET_MODEL:-qwen/qwen3.6-27b}
+      JUDGE_MODEL: ${JUDGE_MODEL:-openai/gpt-oss-120b}
+      ENVIRONMENT: ${ENVIRONMENT:-local}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SCAN_CONCURRENCY: ${SCAN_CONCURRENCY:-4}
+      SCAN_LEASE_SECONDS: ${SCAN_LEASE_SECONDS:-300}
+      SCAN_MAX_ATTEMPTS: ${SCAN_MAX_ATTEMPTS:-3}
+      WORKER_ID: worker-1
+      LOGFIRE_TOKEN: ${LOGFIRE_TOKEN:-}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+    depends_on:
+      db:
+        condition: service_healthy
+      # The API owns migrations; the worker starts once the schema exists.
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+      target: dev
+    environment:
+      VITE_API_BASE_URL: http://localhost:8000
+    ports:
+      - "5173:5173"
+    volumes:
+      # Source is mounted for hot reload; node_modules stays in the container so
+      # the host does not need Node installed at all.
+      - ./apps/web/src:/app/src:ro
+      - ./apps/web/index.html:/app/index.html:ro
+    depends_on:
+      api:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  pgdata:
