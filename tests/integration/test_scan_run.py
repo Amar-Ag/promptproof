@@ -18,6 +18,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.stubs import StubModelClient, verdict_json
 
+# Derived, not frozen: the corpus grows, and a hardcoded count would make
+# every one of these tests fail the next time a probe is added.
 ALL_SUITES = [
     "direct-injection",
     "jailbreak",
@@ -26,6 +28,9 @@ ALL_SUITES = [
     "indirect-injection",
     "tool-abuse",
 ]
+
+# How many probes a full-suite scan runs, read from the corpus itself.
+TOTAL_PROBES = len(get_corpus().probes)
 
 
 def settings(**overrides: object) -> Settings:
@@ -103,7 +108,7 @@ class TestCompletion:
         assert done.finished_at is not None
         assert done.judge_model == cfg.judge_model
         assert done.counts is not None
-        assert done.counts["total"] == 6
+        assert done.counts["total"] == TOTAL_PROBES
         assert done.counts["errored"] == 0
 
     async def test_one_finding_per_probe(self, session: AsyncSession) -> None:
@@ -112,7 +117,7 @@ class TestCompletion:
         await run(session, scan, client_exploiting(set(), cfg.judge_model), cfg)
 
         found = await findings_of(session, scan)
-        assert len(found) == 6
+        assert len(found) == TOTAL_PROBES
         assert {f.probe_id for f in found} == {p.id for p in get_corpus().probes}
         assert all(f.judge_rationale == "stub verdict" for f in found)
         assert all(f.response_excerpt for f in found)
@@ -157,8 +162,8 @@ class TestFailureHandling:
         assert done.status == "completed"
         assert done.grade is None
         assert done.counts is not None
-        assert done.counts["errored"] == 6
-        assert done.counts["total"] == 6
+        assert done.counts["errored"] == TOTAL_PROBES
+        assert done.counts["total"] == TOTAL_PROBES
 
     async def test_one_failing_probe_does_not_fail_the_scan(self, session: AsyncSession) -> None:
         cfg = settings()
@@ -215,7 +220,7 @@ class TestResumption:
         done = await run(session, scan, client, cfg)
 
         found = await findings_of(session, scan)
-        assert len(found) == 6
+        assert len(found) == TOTAL_PROBES
         assert done.status == "completed"
 
         # The already-resolved probes were not re-run and kept their evidence.
@@ -224,7 +229,7 @@ class TestResumption:
 
         # Only the remaining four probes were sent to the target.
         target_calls = [c for c in client.calls if c["model"] != cfg.judge_model]
-        assert len(target_calls) == 4
+        assert len(target_calls) == TOTAL_PROBES - len(already)
 
 
 class TestConcurrency:
