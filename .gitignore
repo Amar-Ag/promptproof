@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# Node
+node_modules/
+dist/
+.vite/
+coverage/
+playwright-report/
+test-results/
+
+# Env & secrets
+.env
+.env.*
+!.env.example
+*.pem
+
+# Editors / OS
+.idea/
+.vscode/*
+!.vscode/extensions.json
+.DS_Store
+Thumbs.db
+
+# Local data
+*.db
+*.sqlite3
+pgdata/
