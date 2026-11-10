@@ -77,6 +77,9 @@ An issue may be closed only when:
 - Commits: conventional commits, present tense, scoped to the service —
   `feat(worker): claim queued scans with SKIP LOCKED`. Reference the issue in the body with
   `Refs #14`, and use `Closes #14` only on the commit that completes it.
+- Closing several issues at once: repeat the keyword — `Closes #1, closes #2, closes #3`.
+  GitHub honours only the first issue in a bare `Closes #1, #2, #3` list and leaves the rest
+  open, which quietly makes the board lie about what is done.
 - Pull requests must contain: a link to the issue, the acceptance criteria reproduced as a
   checklist with evidence against each, what was tested and how, and anything deliberately
   left out. A PR body that does not let a reviewer verify acceptance without reading the diff

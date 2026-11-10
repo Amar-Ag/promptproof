@@ -2,6 +2,10 @@
 
 Closes #
 
+> Repeat the keyword for every issue: `Closes #1, closes #2, closes #3`.
+> GitHub honours only the first issue in a bare `Closes #1, #2, #3` list and
+> silently leaves the rest open.
+
 Spec requirement: `R-00?-?`
 
 ## Acceptance criteria

@@ -89,6 +89,8 @@ make up
 
 One command brings up the frontend, API, worker and Postgres, and applies migrations. The UI is then on `http://localhost:5173` and the API docs on `http://localhost:8000/docs`.
 
+If something on your machine already uses those ports, set `API_PORT`, `WEB_PORT` or `DB_PORT` in `.env` — only the ports published to your host change, and the frontend is pointed at the API automatically.
+
 ```bash
 make test
 make e2e
