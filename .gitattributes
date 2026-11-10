@@ -1,0 +1,17 @@
+# Normalise to LF in the repository, and check out LF everywhere.
+#
+# This is not cosmetic: a shell script with CRLF endings fails inside a Linux
+# container with an unhelpful "no such file or directory", because the kernel
+# reads the carriage return as part of the interpreter path. The entrypoint
+# script is exactly that case.
+* text=auto eol=lf
+
+*.sh      text eol=lf
+Dockerfile text eol=lf
+Makefile  text eol=lf
+*.yaml    text eol=lf
+*.yml     text eol=lf
+
+# Lockfiles are generated; keep them out of diffs and language stats.
+uv.lock                     linguist-generated=true -diff
+apps/web/package-lock.json  linguist-generated=true -diff
