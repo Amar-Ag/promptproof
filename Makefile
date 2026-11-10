@@ -6,6 +6,11 @@
 COMPOSE := docker compose
 WEB     := $(COMPOSE) run --rm --no-deps web
 
+# Git Bash on Windows rewrites arguments that look like absolute POSIX paths
+# into Windows paths, which turns `docker run -w /w` into `-w W:/` and fails.
+# Unset elsewhere, this variable does nothing.
+export MSYS_NO_PATHCONV := 1
+
 .DEFAULT_GOAL := help
 .PHONY: help up down reset logs ps shell psql test test-unit test-integration test-web \
         e2e lint fmt migrate migration lock web-lock

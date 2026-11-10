@@ -78,8 +78,14 @@ async def claim_next_scan(
         lease_seconds=lease_seconds,
         max_attempts=max_attempts,
     )
+    # `populate_existing` is required, not optional. Without it, a session that
+    # has already loaded this scan returns its cached instance from the identity
+    # map and silently discards the RETURNING row — so the caller would see the
+    # pre-claim `status` and `attempts` and act on stale queue state.
     result = await session.execute(
-        select(Scan).from_statement(stmt.columns(*Scan.__table__.columns))
+        select(Scan)
+        .from_statement(stmt.columns(*Scan.__table__.columns))
+        .execution_options(populate_existing=True)
     )
     return result.scalars().one_or_none()
 

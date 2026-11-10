@@ -5,7 +5,8 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "jsx": "react-jsx",
-    "types": ["vitest/globals", "@testing-library/jest-dom"],
+    // vite/client supplies import.meta.env.
+    "types": ["vite/client", "vitest/globals", "@testing-library/jest-dom"],
 
     "strict": true,
     "noUncheckedIndexedAccess": true,
