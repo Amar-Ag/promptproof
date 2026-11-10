@@ -5,6 +5,11 @@
 
 COMPOSE := docker compose
 WEB     := $(COMPOSE) run --rm --no-deps web
+# The test image: the same base the services run on, plus dev dependencies and
+# the tests themselves. The runtime image carries neither, on purpose.
+TESTS   := $(COMPOSE) --profile test run --rm tests
+# Same image without waiting on Postgres, for things that need no database.
+TESTS_X := $(COMPOSE) --profile test run --rm --no-deps tests
 
 # Git Bash on Windows rewrites arguments that look like absolute POSIX paths
 # into Windows paths, which turns `docker run -w /w` into `-w W:/` and fails.
@@ -22,10 +27,10 @@ help: ## Show this help
 # ── Running ──────────────────────────────────────────────────────────────────
 
 up: ## Build and start the full system, apply migrations, wait until ready
-	$(COMPOSE) up --build --wait --wait-timeout 180
+	$(COMPOSE) up --build --wait --wait-timeout 240
 	@echo ""
-	@echo "  UI       http://localhost:5173"
-	@echo "  API docs http://localhost:8000/docs"
+	@echo "  UI       http://localhost:$${WEB_PORT:-5173}"
+	@echo "  API docs http://localhost:$${API_PORT:-8000}/docs"
 	@echo ""
 
 down: ## Stop everything, keep the data
@@ -51,31 +56,30 @@ psql: ## A psql prompt against the running database
 test: test-unit test-integration test-web ## Unit + integration + frontend tests
 
 test-unit: ## Unit tests only (no I/O, fast)
-	$(COMPOSE) run --rm --no-deps -e DATABASE_URL=postgresql+asyncpg://unused/unused \
-		api uv run --frozen pytest tests/unit -q
+	$(TESTS_X) uv run --frozen pytest tests/unit -q
 
 test-integration: ## Integration tests against a real Postgres
 	$(COMPOSE) up -d --wait db
-	$(COMPOSE) run --rm api uv run --frozen pytest tests/integration -q
+	$(TESTS) uv run --frozen pytest tests/integration -q
 
 test-web: ## Frontend tests
 	$(WEB) npm run test
 
 e2e: ## Playwright end-to-end journey against a running stack
-	$(COMPOSE) run --rm --no-deps web npm run e2e
+	$(WEB) npm run e2e
 
 # ── Quality ──────────────────────────────────────────────────────────────────
 
 lint: ## Ruff, mypy, eslint, tsc
-	$(COMPOSE) run --rm --no-deps api uv run --frozen ruff check .
-	$(COMPOSE) run --rm --no-deps api uv run --frozen ruff format --check .
-	$(COMPOSE) run --rm --no-deps api uv run --frozen mypy packages apps
+	$(TESTS_X) uv run --frozen ruff check .
+	$(TESTS_X) uv run --frozen ruff format --check .
+	$(TESTS_X) uv run --frozen mypy packages apps
 	$(WEB) npm run lint
 	$(WEB) npm run typecheck
 
 fmt: ## Format everything in place
-	$(COMPOSE) run --rm --no-deps api uv run --frozen ruff format .
-	$(COMPOSE) run --rm --no-deps api uv run --frozen ruff check --fix .
+	$(TESTS_X) uv run --frozen ruff format .
+	$(TESTS_X) uv run --frozen ruff check --fix .
 
 # ── Database ─────────────────────────────────────────────────────────────────
 

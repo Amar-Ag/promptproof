@@ -32,7 +32,7 @@ async def make_target(session: AsyncSession, name: str = "t") -> Target:
         family_id=family.id,
         version=1,
         kind="prompt",
-        model="qwen/qwen3.6-27b",
+        model="qwen/qwen3.8-27b",
         system_prompt="You only discuss cheese.",
     )
     session.add(target)
@@ -273,7 +273,7 @@ class TestTargetVersioning:
             family_id=target.family_id,
             version=1,
             kind="prompt",
-            model="qwen/qwen3.6-27b",
+            model="qwen/qwen3.8-27b",
             system_prompt="different text, same version",
         )
         session.add(duplicate)

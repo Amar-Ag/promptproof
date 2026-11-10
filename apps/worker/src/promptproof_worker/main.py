@@ -23,6 +23,7 @@ from promptproof_core.grading import grade_findings
 from promptproof_core.logging import bind_scan, clear_context, configure_logging, get_logger
 from promptproof_core.models import Finding, Scan, Target
 from promptproof_core.probes import Probe, get_corpus
+from promptproof_core.provider import GroqClient, ModelClient, build_client
 from promptproof_core.queue import claim_next_scan, fail_exhausted_scans
 from promptproof_core.settings import Settings, get_settings
 from sqlalchemy import select, text
@@ -96,6 +97,7 @@ async def _run_probes(
     target: Target,
     probes: tuple[Probe, ...],
     settings: Settings,
+    client: ModelClient,
 ) -> None:
     """Execute probes with at most `scan_concurrency` in flight."""
     semaphore = asyncio.Semaphore(settings.scan_concurrency)
@@ -103,7 +105,7 @@ async def _run_probes(
     async def one(probe: Probe) -> tuple[Probe, ProbeResult]:
         async with semaphore:
             try:
-                return probe, await execute_probe(probe, target, settings)
+                return probe, await execute_probe(probe, target, settings, client)
             except Exception as exc:  # a probe never fails the scan
                 log.warning(
                     "probe.errored",
@@ -157,7 +159,9 @@ async def _fail(session: AsyncSession, scan: Scan, reason: str) -> None:
     log.error("scan.failed", scan_id=str(scan.id), reason=reason)
 
 
-async def _process(session: AsyncSession, scan: Scan, settings: Settings) -> None:
+async def _process(
+    session: AsyncSession, scan: Scan, settings: Settings, client: ModelClient
+) -> None:
     bind_scan(str(scan.id))
     try:
         target = await session.get(Target, scan.target_id)
@@ -182,13 +186,13 @@ async def _process(session: AsyncSession, scan: Scan, settings: Settings) -> Non
             probe_count=len(probes),
             resuming=len(done),
         )
-        await _run_probes(session, scan, target, pending, settings)
+        await _run_probes(session, scan, target, pending, settings, client)
         await _complete(session, scan)
     finally:
         clear_context()
 
 
-async def _loop(settings: Settings) -> None:
+async def _loop(settings: Settings, client: ModelClient) -> None:
     sessionmaker = get_sessionmaker()
     idle_logged = False
 
@@ -221,7 +225,7 @@ async def _loop(settings: Settings) -> None:
 
             idle_logged = False
             await session.commit()
-            await _process(session, scan, settings)
+            await _process(session, scan, settings, client)
 
 
 async def main() -> None:
@@ -248,8 +252,17 @@ async def main() -> None:
             signal.signal(sig, _request_shutdown)
 
     try:
-        await _loop(settings)
+        client: GroqClient = build_client(settings)
+    except ValueError as exc:
+        # A missing key is a configuration error, not a runtime one. Exiting
+        # with the reason beats idling while scans pile up unexplained.
+        log.error("worker.misconfigured", reason=str(exc))
+        raise SystemExit(1) from exc
+
+    try:
+        await _loop(settings, client)
     finally:
+        await client.aclose()
         await dispose_engine()
         log.info("worker.stop")
 

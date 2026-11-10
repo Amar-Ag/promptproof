@@ -1,10 +1,14 @@
 # Python image for both `api` and `worker`.
 #
+# Stages are targeted explicitly by compose. They have to be: a stage added at
+# the end of this file becomes the default build target, and a service with no
+# `target` would silently start running the test image instead of serving.
+#
 # One image, two commands: the services share all their code through
 # packages/core, so building twice would only duplicate layers. Compose and Fly
 # override the command per service.
 
-FROM python:3.12-slim AS base
+FROM python:3.12-slim AS runtime
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -53,3 +57,18 @@ EXPOSE 8000
 
 # The API is the default; compose overrides this for the worker.
 CMD ["entrypoint-api"]
+
+# ── Test stage ───────────────────────────────────────────────────────────────
+# The runtime image deliberately carries neither dev dependencies nor tests.
+# This stage adds both, so `make test` runs the suite in the same environment
+# the services run in rather than against whatever the host happens to have.
+FROM runtime AS test
+
+USER root
+COPY tests/ tests/
+# Not in the runtime image, but it is still code that lint should cover.
+COPY scripts/ scripts/
+RUN uv sync --frozen  && chown -R promptproof:promptproof /app /opt/venv
+USER promptproof
+
+CMD ["uv", "run", "--frozen", "pytest", "-q"]

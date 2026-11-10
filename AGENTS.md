@@ -109,5 +109,14 @@ Changing a locked row needs an ADR in [docs/adr](docs/adr) before the code chang
 
 ## Current state
 
-Phase 0 — specification and process documentation. No application code yet. The build order
-and what each phase delivers is in [docs/process.md](docs/process.md#build-phases).
+Phase 2 — the product. The walking skeleton is complete: the four services come up with one
+command, targets are registered and versioned, scans are queued and claimed off the Postgres
+queue, and the report renders.
+
+Probes now really run: the target is called, an independent judge decides each outcome
+against the probe's declared criteria, and the scan is graded. Still open in this phase are
+the probe corpus beyond its six seed probes (#10, #11) and the SSRF guard with endpoint
+targets (#17).
+
+The build order and what each phase delivers is in
+[docs/process.md](docs/process.md#build-phases).

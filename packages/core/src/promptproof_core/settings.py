@@ -30,7 +30,7 @@ class Settings(BaseSettings):
 
     # ── Models ────────────────────────────────────────────────────────────────
     groq_api_key: str = ""
-    default_target_model: str = "qwen/qwen3.6-27b"
+    default_target_model: str = "qwen/qwen3.8-27b"
     judge_model: str = "openai/gpt-oss-120b"
     model_timeout_seconds: float = Field(default=60.0, gt=0)
     model_max_retries: int = Field(default=3, ge=0, le=10)
@@ -59,7 +59,7 @@ class Settings(BaseSettings):
         """A model must never grade its own output.
 
         Compares model *families* (the part before the first `/`), because
-        `qwen/qwen3.6-27b` judging `qwen/qwen3-8b` is still self-evaluation.
+        `qwen/qwen3.8-27b` judging `qwen/qwen3-8b` is still self-evaluation.
         """
         target_family = self.default_target_model.split("/", 1)[0].lower()
         judge_family = self.judge_model.split("/", 1)[0].lower()
