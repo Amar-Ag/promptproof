@@ -11,6 +11,7 @@ from typing import Annotated, Any, Literal, Self
 
 from promptproof_core.catalog import TARGET_MODEL_IDS
 from promptproof_core.models import Finding, Scan, Target, TargetFamily
+from promptproof_core.probes import Probe
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 MAX_SYSTEM_PROMPT = 20_000
@@ -208,8 +209,17 @@ class FindingOut(BaseModel):
     judge_latency_ms: int | None
     created_at: datetime
 
+    # Read from the probe corpus at request time rather than copied onto the
+    # row: the corpus is versioned in git and the scan records which version
+    # produced it, so the text is recoverable without duplicating it per
+    # finding. A probe retired since the scan ran simply yields nulls, which
+    # the UI renders as a missing-probe note rather than failing.
+    title: str | None = None
+    payload: str | None = None
+    remediation: str | None = None
+
     @classmethod
-    def of(cls, finding: Finding) -> "FindingOut":
+    def of(cls, finding: Finding, probe: "Probe | None" = None) -> "FindingOut":
         return cls(
             id=finding.id,
             probe_id=finding.probe_id,
@@ -225,6 +235,9 @@ class FindingOut(BaseModel):
             target_latency_ms=finding.target_latency_ms,
             judge_latency_ms=finding.judge_latency_ms,
             created_at=finding.created_at,
+            title=probe.title if probe else None,
+            payload=probe.payload if probe else None,
+            remediation=probe.remediation if probe else None,
         )
 
 

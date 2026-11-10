@@ -175,10 +175,14 @@ async def get_scan(scan_id: uuid.UUID, session: SessionDep, response: Response) 
     if scan.status in ("pending", "running"):
         response.headers["Cache-Control"] = "no-store"
 
+    # One lookup for the whole report, so each finding can show the payload that
+    # produced it and the remediation for it.
+    probes = {p.id: p for p in get_corpus().probes}
+
     return ScanDetail(
         scan=ScanOut.of(scan, name, version),
         resolved_count=len(findings),
-        findings=[FindingOut.of(f) for f in findings],
+        findings=[FindingOut.of(f, probes.get(f.probe_id)) for f in findings],
     )
 
 

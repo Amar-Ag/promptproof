@@ -10,7 +10,7 @@ from promptproof_core.settings import Settings
 
 def make(**overrides: object) -> Settings:
     base: dict[str, object] = {
-        "default_target_model": "qwen/qwen3.6-27b",
+        "default_target_model": "qwen/qwen3.8-27b",
         "judge_model": "openai/gpt-oss-120b",
         "environment": "local",
         "ssrf_allow_private": False,
@@ -24,14 +24,14 @@ def test_different_families_are_accepted() -> None:
 
 
 def test_identical_model_is_rejected() -> None:
-    settings = make(judge_model="qwen/qwen3.6-27b")
+    settings = make(judge_model="qwen/qwen3.8-27b")
     with pytest.raises(ValueError, match="same model family"):
         settings.assert_judge_differs()
 
 
 def test_same_family_different_size_is_still_rejected() -> None:
     """A model must not grade its own output, and a sibling is not independent."""
-    settings = make(default_target_model="qwen/qwen3.6-27b", judge_model="qwen/qwen3-8b")
+    settings = make(default_target_model="qwen/qwen3.8-27b", judge_model="qwen/qwen3-8b")
     with pytest.raises(ValueError, match="same model family"):
         settings.assert_judge_differs()
 

@@ -93,6 +93,11 @@ export interface Finding {
   target_latency_ms: number | null;
   judge_latency_ms: number | null;
   created_at: string;
+  // Read from the probe corpus at request time. Null when the probe has been
+  // retired since the scan ran.
+  title: string | null;
+  payload: string | null;
+  remediation: string | null;
 }
 
 export interface ScanDetail {

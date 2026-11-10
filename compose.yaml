@@ -31,11 +31,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      target: runtime
     environment:
       DATABASE_URL: >-
         postgresql+asyncpg://${POSTGRES_USER:-promptproof}:${POSTGRES_PASSWORD:-promptproof}@db:5432/${POSTGRES_DB:-promptproof}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
-      DEFAULT_TARGET_MODEL: ${DEFAULT_TARGET_MODEL:-qwen/qwen3.6-27b}
+      DEFAULT_TARGET_MODEL: ${DEFAULT_TARGET_MODEL:-qwen/qwen3.8-27b}
       JUDGE_MODEL: ${JUDGE_MODEL:-openai/gpt-oss-120b}
       ENVIRONMENT: ${ENVIRONMENT:-local}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -60,12 +61,13 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      target: runtime
     command: ["promptproof-worker"]
     environment:
       DATABASE_URL: >-
         postgresql+asyncpg://${POSTGRES_USER:-promptproof}:${POSTGRES_PASSWORD:-promptproof}@db:5432/${POSTGRES_DB:-promptproof}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
-      DEFAULT_TARGET_MODEL: ${DEFAULT_TARGET_MODEL:-qwen/qwen3.6-27b}
+      DEFAULT_TARGET_MODEL: ${DEFAULT_TARGET_MODEL:-qwen/qwen3.8-27b}
       JUDGE_MODEL: ${JUDGE_MODEL:-openai/gpt-oss-120b}
       ENVIRONMENT: ${ENVIRONMENT:-local}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -104,6 +106,26 @@ services:
       api:
         condition: service_started
     restart: unless-stopped
+
+  # Not part of the running system: `profiles` keeps it out of `make up`.
+  # It exists so the test suite runs in the same image the services do.
+  tests:
+    profiles: ["test"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: test
+    environment:
+      # A separate database, created on demand by the integration fixtures, so
+      # running the suite never disturbs the data you were looking at.
+      DATABASE_URL: >-
+        postgresql+asyncpg://${POSTGRES_USER:-promptproof}:${POSTGRES_PASSWORD:-promptproof}@db:5432/${POSTGRES_DB:-promptproof}
+      ENVIRONMENT: test
+      LOG_LEVEL: WARNING
+      GROQ_API_KEY: test-key-not-used-by-any-test
+    depends_on:
+      db:
+        condition: service_healthy
 
 volumes:
   pgdata:

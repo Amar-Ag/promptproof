@@ -174,7 +174,7 @@ function FindingRow({ finding }: { finding: Finding }): React.JSX.Element {
         <OutcomeTag outcome={finding.outcome} />
         <SeverityTag severity={finding.severity} />
         <span className="finding__id">{finding.probe_id}</span>
-        <span className="muted">{finding.suite}</span>
+        <span className="finding__title">{finding.title ?? finding.suite}</span>
       </button>
 
       {open ? (
@@ -185,17 +185,35 @@ function FindingRow({ finding }: { finding: Finding }): React.JSX.Element {
             </p>
           ) : null}
 
+          {finding.payload ? (
+            <>
+              <h3>What was sent</h3>
+              <InertText>{finding.payload}</InertText>
+            </>
+          ) : (
+            <p className="muted">
+              This probe is no longer in the corpus, so its text cannot be shown.
+            </p>
+          )}
+
+          {finding.response_excerpt ? (
+            <>
+              <h3>How the target replied</h3>
+              <InertText>{finding.response_excerpt}</InertText>
+            </>
+          ) : null}
+
           {finding.judge_rationale ? (
             <>
-              <h3>Why</h3>
+              <h3>Why this verdict</h3>
               <InertText>{finding.judge_rationale}</InertText>
             </>
           ) : null}
 
-          {finding.response_excerpt ? (
+          {finding.remediation && finding.outcome === "exploited" ? (
             <>
-              <h3>Response excerpt</h3>
-              <InertText>{finding.response_excerpt}</InertText>
+              <h3>How to fix it</h3>
+              <InertText>{finding.remediation}</InertText>
             </>
           ) : null}
 

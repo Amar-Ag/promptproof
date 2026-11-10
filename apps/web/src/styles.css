@@ -523,6 +523,12 @@ legend {
 .finding__id {
   font-family: var(--mono);
   font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.finding__title {
+  flex: 1;
+  min-width: 12ch;
 }
 
 .finding__body {
