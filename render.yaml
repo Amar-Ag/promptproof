@@ -23,6 +23,10 @@ services:
     region: ohio
     dockerfilePath: ./Dockerfile
     dockerContext: .
+    # Pinned. Without this Render connects the service to whichever branch the
+    # blueprint was created from and keeps building it forever — which is how
+    # dev ended up serving a merged feature branch long after it was dead.
+    branch: main
     healthCheckPath: /healthz
     autoDeploy: false
     envVars:
@@ -59,6 +63,10 @@ services:
     region: ohio
     dockerfilePath: ./Dockerfile
     dockerContext: .
+    # Pinned. Without this Render connects the service to whichever branch the
+    # blueprint was created from and keeps building it forever — which is how
+    # dev ended up serving a merged feature branch long after it was dead.
+    branch: main
     healthCheckPath: /healthz
     autoDeploy: false
     envVars:

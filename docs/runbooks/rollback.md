@@ -109,6 +109,47 @@ it back.
 
 ## Exercise log
 
-| Date | Deploy | Reason | Migration involved | Outcome |
+| Date | Environment | Reason | Migration involved | Outcome |
 |---|---|---|---|---|
-| _pending_ | — | Deliberate drill | No | _to be recorded on the first deploy_ |
+| 2026-11-11 | dev | Deliberate drill | No | **Failed, then passed.** Found two defects. Details below. |
+
+### 2026-11-11 — first drill
+
+Run against dev, deliberately, before anyone needed it. It failed twice before it
+worked, and both failures are worth keeping.
+
+**Attempt 1 — the workflow could never find a target.** It selected "the second
+*live* deploy". Render marks a superseded deploy `deactivated`; only the one
+currently serving is `live`. So the filter matched a list of exactly one and
+reported:
+
+```
+Recent deploys:
+  dep-dbpsor1srm7s738ooad0  live
+  dep-dbpsjg3rjlhs73avevgg  deactivated
+ERROR: No earlier live deploy to roll back to. This service has only ever had one.
+```
+
+The message was confident and wrong, and it would only ever have appeared
+mid-incident. Fixed to accept `live` or `deactivated`.
+
+**Attempt 2 — rolling back while a rollback was still running.** Render answered
+`rollback is not supported for deploy dep-…`, because that deploy was still the
+live one: the previous rollback had not finished taking over. Selecting a target
+mid-flight always picks one Render will refuse. The workflow now waits for every
+in-flight deploy to settle before choosing.
+
+**Attempt 3 — worked.** Rolled dev from `fb0c2f2` back to `b8c77d2`, confirmed
+`/readyz` came back green, then rolled forward again. Total time about four
+minutes, most of it the free instance rebuilding.
+
+**A third defect, found by accident.** The deploy listing prints each deploy's
+commit, which is how it came out that dev had been building `b8c77d2` — the tip
+of a feature branch merged and dead — on every deploy since the services were
+created. Every one of those deploys was green: built, live, health check passed.
+It was simply the wrong code. The services are now pinned to `main` in
+`render.yaml`, and both deploy workflows log the commit Render actually built
+rather than the one they asked for.
+
+The lesson worth carrying: a deploy pipeline reporting success tells you a
+deploy happened, not that it deployed what you meant.
