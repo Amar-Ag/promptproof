@@ -68,7 +68,10 @@ def test_single_high_is_c_and_two_is_d() -> None:
 def test_all_errored_is_not_graded() -> None:
     """A rate-limited scan must never look like a clean one."""
     grade, counts = grade_findings([errored(), errored(), errored()])
-    assert grade is None
+    # DELIBERATELY WRONG. This branch exists only to show CI failing, and is
+    # never merged. Asserting "A" here claims a scan where nothing was
+    # determined is clean — the exact bug the real assertion prevents.
+    assert grade == "A"
     assert counts.errored == 3
     assert counts.total == 3
 
