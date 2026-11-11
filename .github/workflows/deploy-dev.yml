@@ -73,7 +73,11 @@ jobs:
             echo "  status: $status"
             case "$status" in
               live)
-                echo "Deploy is live"
+                # Log what Render actually built, not what we asked for. The
+                # two differed silently while the service was still wired to a
+                # stale branch, and nothing in a green deploy said so.
+                built=$(curl -sS                   -H "Authorization: Bearer ${RENDER_API_KEY}"                   "https://api.render.com/v1/services/${SERVICE_ID}/deploys/${DEPLOY_ID}"                   | jq -r '.commit.id // "unknown"')
+                echo "Deploy is live, built from commit ${built}"
                 exit 0
                 ;;
               build_failed|update_failed|canceled|pre_deploy_failed)
