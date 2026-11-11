@@ -15,8 +15,9 @@ without any loop-scope configuration to get wrong.
 """
 
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 
+import pytest
 import pytest_asyncio
 from promptproof_core.models import Base
 from sqlalchemy import text
@@ -114,3 +115,54 @@ async def sessions(
         yield a, b
         await a.rollback()
         await b.rollback()
+
+
+# ── Telemetry capture ────────────────────────────────────────────────────────
+# Installed once, at import, and shared by every test that inspects spans or
+# metrics. OpenTelemetry refuses to replace a provider after it is set, so the
+# private one-shot guards are reset first. That is deliberate use of private
+# API in tests: the alternative is threading providers through every call site
+# for the benefit of tests alone, which would make the production code worse.
+
+from opentelemetry import trace as _trace_api  # noqa: E402
+from opentelemetry.metrics import _internal as _metrics_internal  # noqa: E402
+from opentelemetry.sdk.metrics import MeterProvider  # noqa: E402
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader  # noqa: E402
+from opentelemetry.sdk.trace import TracerProvider  # noqa: E402
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor  # noqa: E402
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import (  # noqa: E402
+    InMemorySpanExporter,
+)
+
+SPAN_EXPORTER = InMemorySpanExporter()
+METRIC_READER = InMemoryMetricReader()
+
+
+def _install_telemetry() -> None:
+    _trace_api._TRACER_PROVIDER = None
+    _trace_api._TRACER_PROVIDER_SET_ONCE._done = False
+    tracer_provider = TracerProvider()
+    tracer_provider.add_span_processor(SimpleSpanProcessor(SPAN_EXPORTER))
+    _trace_api.set_tracer_provider(tracer_provider)
+
+    # The metrics guards live on the _internal module, unlike tracing's,
+    # and set_meter_provider is re-exported from there too.
+    _metrics_internal._METER_PROVIDER = None
+    _metrics_internal._METER_PROVIDER_SET_ONCE._done = False
+    _metrics_internal.set_meter_provider(MeterProvider(metric_readers=[METRIC_READER]))
+
+
+_install_telemetry()
+
+
+@pytest.fixture(autouse=True)
+def captured_spans() -> Iterator[InMemorySpanExporter]:
+    """A clean span exporter per test."""
+    SPAN_EXPORTER.clear()
+    yield SPAN_EXPORTER
+    SPAN_EXPORTER.clear()
+
+
+@pytest.fixture
+def metric_reader() -> InMemoryMetricReader:
+    return METRIC_READER

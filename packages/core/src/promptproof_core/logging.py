@@ -4,16 +4,42 @@ Every line is JSON, and every line emitted while handling a scan carries the
 trace and span ID so logs join to traces and metrics on one identifier
 (docs/observability.md).
 
-The OpenTelemetry processor that injects those IDs is added in Phase 5. The
-contract is established here so no module logs through a channel that bypasses
-it: nothing calls `logging.getLogger` directly, everything calls `get_logger`.
+Correlation is a processor rather than something call sites remember to pass:
+`_add_trace_correlation` reads the active span and attaches `trace_id` and
+`span_id` to every record. That is the only way the guarantee holds — a rule
+saying "always include the trace id" is a rule that gets forgotten in the one
+error path you most wanted it on.
+
+Nothing calls `logging.getLogger` directly; everything calls `get_logger`, so
+there is no channel that bypasses this.
 """
 
 import logging
 import sys
+from collections.abc import MutableMapping
 from typing import Any
 
 import structlog
+
+
+def _add_trace_correlation(
+    _logger: Any, _method: str, event: MutableMapping[str, Any]
+) -> MutableMapping[str, Any]:
+    """Attach the active trace and span id to every record.
+
+    Imported lazily: `logging` is the lowest-level module here and importing
+    telemetry at module scope would make the two circular.
+    """
+    try:
+        from opentelemetry import trace
+    except ImportError:  # pragma: no cover - the dependency is declared
+        return event
+
+    context = trace.get_current_span().get_span_context()
+    if context.is_valid:
+        event["trace_id"] = format(context.trace_id, "032x")
+        event["span_id"] = format(context.span_id, "016x")
+    return event
 
 
 def configure_logging(level: str = "INFO", environment: str = "local") -> None:
@@ -32,6 +58,7 @@ def configure_logging(level: str = "INFO", environment: str = "local") -> None:
         structlog.contextvars.merge_contextvars,
         structlog.stdlib.add_log_level,
         structlog.stdlib.add_logger_name,
+        _add_trace_correlation,
         structlog.processors.TimeStamper(fmt="iso", utc=True),
         structlog.processors.StackInfoRenderer(),
         structlog.processors.UnicodeDecoder(),
