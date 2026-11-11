@@ -1,0 +1,151 @@
+# Continuous integration.
+#
+# The suite runs natively here rather than through `make`, because starting the
+# Compose stack for every job would add minutes to a check that should give
+# feedback in under two. The commands are the same ones the Makefile runs.
+#
+# That divergence is a real risk, and this project has already been bitten by it
+# twice — a documented command that looked like it worked while exercising
+# something other than what it claimed. The `images` job is the mitigation: it
+# builds every Compose target on each run, so the Dockerfiles cannot rot while
+# the native path stays green.
+#
+# No secret is required. Every test stubs the model provider, and a fixture
+# fails the run on any unstubbed outbound connection.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A new push supersedes the run in flight for the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  UV_VERSION: "0.12.10"
+  NODE_VERSION: "22"
+
+jobs:
+  lint:
+    name: Lint and types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      - name: Install the workspace
+        run: uv sync --frozen
+
+      - name: Ruff
+        run: uv run --frozen ruff check .
+
+      - name: Ruff format
+        run: uv run --frozen ruff format --check .
+
+      - name: Mypy
+        run: uv run --frozen mypy packages apps
+
+  test:
+    name: Python tests
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: promptproof
+          POSTGRES_PASSWORD: promptproof
+          POSTGRES_DB: promptproof
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U promptproof -d promptproof"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+
+    env:
+      DATABASE_URL: postgresql+asyncpg://promptproof:promptproof@localhost:5432/promptproof
+      ENVIRONMENT: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      - name: Install the workspace
+        run: uv sync --frozen
+
+      - name: Apply migrations
+        run: uv run --frozen alembic upgrade head
+
+      # The integration fixtures build their schema from the models for speed,
+      # which only stays honest if the migrations say the same thing. `alembic
+      # check` fails when they have drifted apart — the parity check that
+      # tests/integration/conftest.py promises.
+      - name: Migrations match the models
+        run: uv run --frozen alembic check
+
+      - name: Unit tests
+        run: uv run --frozen pytest tests/unit -q
+
+      - name: Integration tests
+        run: uv run --frozen pytest tests/integration -q
+
+  web:
+    name: Frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: ESLint
+        run: npm run lint
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Vitest
+        run: npm run test
+
+  images:
+    name: Compose images build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Catches the failure mode the native jobs structurally cannot: a
+      # Dockerfile that no longer builds, or a Compose file that no longer
+      # references a stage that exists.
+      - name: Build every Compose target
+        run: docker compose --profile test build
