@@ -7,9 +7,13 @@ COMPOSE := docker compose
 WEB     := $(COMPOSE) run --rm --no-deps web
 # The test image: the same base the services run on, plus dev dependencies and
 # the tests themselves. The runtime image carries neither, on purpose.
-TESTS   := $(COMPOSE) --profile test run --rm tests
+# --build is not optional. `compose run` reuses whatever image exists, so
+# without it the suite silently runs against a stale snapshot of the code and
+# reports a pass for tests that no longer exist. It cost a false "verified"
+# here once already.
+TESTS   := $(COMPOSE) --profile test run --build --rm tests
 # Same image without waiting on Postgres, for things that need no database.
-TESTS_X := $(COMPOSE) --profile test run --rm --no-deps tests
+TESTS_X := $(COMPOSE) --profile test run --build --rm --no-deps tests
 
 # Git Bash on Windows rewrites arguments that look like absolute POSIX paths
 # into Windows paths, which turns `docker run -w /w` into `-w W:/` and fails.
