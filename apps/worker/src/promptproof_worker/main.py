@@ -26,6 +26,13 @@ from promptproof_core.probes import Probe, get_corpus
 from promptproof_core.provider import GroqClient, ModelClient, build_client
 from promptproof_core.queue import claim_next_scan, fail_exhausted_scans
 from promptproof_core.settings import Settings, get_settings
+from promptproof_core.telemetry import (
+    configure_telemetry,
+    context_from_traceparent,
+    set_attributes,
+    shutdown_telemetry,
+    span,
+)
 from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -105,7 +112,17 @@ async def _run_probes(
     async def one(probe: Probe) -> tuple[Probe, ProbeResult]:
         async with semaphore:
             try:
-                return probe, await execute_probe(probe, target, settings, client)
+                with span(
+                    "probe.execute",
+                    attributes={
+                        "probe.id": probe.id,
+                        "probe.suite": probe.suite,
+                        "probe.severity": probe.severity,
+                    },
+                ):
+                    result = await execute_probe(probe, target, settings, client)
+                    set_attributes(**{"finding.outcome": result.outcome})
+                    return probe, result
             except Exception as exc:  # a probe never fails the scan
                 log.warning(
                     "probe.errored",
@@ -160,36 +177,56 @@ async def _fail(session: AsyncSession, scan: Scan, reason: str) -> None:
 
 
 async def _process(
-    session: AsyncSession, scan: Scan, settings: Settings, client: ModelClient
+    session: AsyncSession,
+    scan: Scan,
+    settings: Settings,
+    client: ModelClient,
+    parent: object | None = None,
 ) -> None:
     bind_scan(str(scan.id))
     try:
-        target = await session.get(Target, scan.target_id)
-        if target is None:
-            await _fail(session, scan, "Target no longer exists")
-            return
-
-        probes = get_corpus().for_suites(list(scan.suites))
-        if not probes:
-            await _fail(session, scan, "The selected suites contain no probes")
-            return
-
-        done = await _already_resolved(session, scan.id)
-        pending = tuple(p for p in probes if p.id not in done)
-
-        scan.judge_model = settings.judge_model
-        await session.commit()
-
-        log.info(
-            "scan.started",
-            attempt=scan.attempts,
-            probe_count=len(probes),
-            resuming=len(done),
-        )
-        await _run_probes(session, scan, target, pending, settings, client)
-        await _complete(session, scan)
+        with span(
+            "scan.execute",
+            parent=parent,  # type: ignore[arg-type]
+            attributes={
+                "scan.id": str(scan.id),
+                "scan.attempt": scan.attempts,
+                "scan.concurrency": settings.scan_concurrency,
+            },
+        ):
+            await _execute(session, scan, settings, client)
     finally:
         clear_context()
+
+
+async def _execute(
+    session: AsyncSession, scan: Scan, settings: Settings, client: ModelClient
+) -> None:
+    target = await session.get(Target, scan.target_id)
+    if target is None:
+        await _fail(session, scan, "Target no longer exists")
+        return
+
+    probes = get_corpus().for_suites(list(scan.suites))
+    if not probes:
+        await _fail(session, scan, "The selected suites contain no probes")
+        return
+
+    done = await _already_resolved(session, scan.id)
+    pending = tuple(p for p in probes if p.id not in done)
+
+    scan.judge_model = settings.judge_model
+    await session.commit()
+
+    log.info(
+        "scan.started",
+        attempt=scan.attempts,
+        probe_count=len(probes),
+        resuming=len(done),
+    )
+    await _run_probes(session, scan, target, pending, settings, client)
+    await _complete(session, scan)
+    set_attributes(**{"scan.grade": scan.grade or "none"})
 
 
 async def _loop(settings: Settings, client: ModelClient) -> None:
@@ -225,7 +262,29 @@ async def _loop(settings: Settings, client: ModelClient) -> None:
 
             idle_logged = False
             await session.commit()
-            await _process(session, scan, settings, client)
+
+            # This is the join. The context was serialised by the API when the
+            # scan was submitted, possibly minutes ago in another process;
+            # rebuilding it here is what makes submission and execution one
+            # trace rather than two unrelated ones.
+            parent = context_from_traceparent(scan.traceparent)
+            queue_wait_ms = int((datetime.now(UTC) - scan.queued_at).total_seconds() * 1000)
+
+            with span(
+                "scan.claim",
+                parent=parent,
+                attributes={
+                    "scan.id": str(scan.id),
+                    "worker.id": settings.worker_id,
+                    "scan.attempt": scan.attempts,
+                    # Makes the queue wait a measured quantity rather than an
+                    # unexplained gap between two spans.
+                    "queue.wait_ms": queue_wait_ms,
+                },
+            ):
+                pass
+
+            await _process(session, scan, settings, client, parent)
 
 
 async def main() -> None:
@@ -251,6 +310,8 @@ async def main() -> None:
             # Windows: signal handlers are not available on the proactor loop.
             signal.signal(sig, _request_shutdown)
 
+    configure_telemetry(settings, service_name="promptproof-worker")
+
     try:
         client: GroqClient = build_client(settings)
     except ValueError as exc:
@@ -264,6 +325,7 @@ async def main() -> None:
     finally:
         await client.aclose()
         await dispose_engine()
+        shutdown_telemetry()
         log.info("worker.stop")
 
 

@@ -94,6 +94,33 @@ default suite selection. Alerting is derived from this, not from resource usage.
 Both deliver to a human channel and to the on-call agent endpoint. Neither is defined on CPU,
 memory, or disk. An alert without a runbook is deleted rather than muted.
 
+## Where the signals go
+
+Traces are exported over OTLP to **Logfire**, at
+`https://logfire-api.pydantic.dev/v1/traces`, authenticated by `LOGFIRE_TOKEN`.
+Open the project at <https://logfire.pydantic.dev> and filter by service:
+
+| Service name | Emits |
+|---|---|
+| `promptproof-api` | `scan.submit` |
+| `promptproof-worker` | `scan.claim`, `scan.execute`, `probe.execute`, `target.invoke`, `judge.evaluate` |
+
+Both appear under the `promptproof` namespace, with
+`deployment.environment.name` set to `local`, `dev` or `production` — so one
+project holds every environment and they are told apart by attribute rather
+than by having three projects.
+
+A scan's trace can be found from its row: `scans.traceparent` holds the W3C
+context, and the middle segment is the trace ID.
+
+```sql
+SELECT id, split_part(traceparent, '-', 2) AS trace_id FROM scans ORDER BY queued_at DESC LIMIT 5;
+```
+
+Nothing here is required for the application to run. With `LOGFIRE_TOKEN`
+unset, spans are still created and context still crosses the queue — they
+simply go nowhere, which is what the test suite runs against.
+
 ## Reading the signals
 
 | Question | Where |
