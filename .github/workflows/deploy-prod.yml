@@ -1,0 +1,152 @@
+# Deployment to production.
+#
+# Deliberately manual. Two independent gates stand between a commit and the
+# production URL:
+#
+#   1. This workflow refuses to run for a commit whose CI did not pass. That is
+#      checked here rather than assumed, because `workflow_dispatch` will
+#      happily run against any ref you hand it.
+#   2. The `production` environment requires a reviewer's approval before the
+#      deploy job starts.
+#
+# The first is a property of the code. The second is a decision by a person.
+# Neither substitutes for the other.
+
+name: Deploy (production)
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Commit SHA to deploy (must be on main and have passed CI)"
+        required: true
+        type: string
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  verify:
+    name: Verify the commit is deployable
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: The commit is on main
+        env:
+          SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          if ! git merge-base --is-ancestor "$SHA" origin/main; then
+            echo "::error::$SHA is not an ancestor of main. Production only ever runs code that is on main." >&2
+            exit 1
+          fi
+          echo "$SHA is on main"
+
+      - name: CI passed on this exact commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ inputs.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # The CI workflow's own conclusion for this SHA — not the branch's
+          # latest, which could be a different commit entirely.
+          conclusion=$(gh api "repos/${REPO}/actions/runs?head_sha=${SHA}" \
+            --jq '[.workflow_runs[] | select(.name == "CI")] | sort_by(.created_at) | last | .conclusion // "none"')
+
+          echo "CI conclusion for ${SHA:0:7}: $conclusion"
+          if [ "$conclusion" != "success" ]; then
+            echo "::error::Refusing to deploy. CI on $SHA concluded '$conclusion', not 'success'." >&2
+            exit 1
+          fi
+
+  deploy:
+    name: Deploy to production
+    needs: verify
+    runs-on: ubuntu-latest
+
+    # The approval gate. Reviewers are configured on the environment itself, so
+    # this cannot be bypassed by editing the workflow in a pull request.
+    environment:
+      name: production
+      url: ${{ vars.PROD_URL }}
+
+    steps:
+      - name: Trigger the Render deploy
+        id: trigger
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID_PROD }}
+          SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          echo "Deploying ${SHA:0:7} to production"
+          response=$(curl -sS -X POST \
+            -H "Authorization: Bearer ${RENDER_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "{\"commitId\": \"${SHA}\", \"clearCache\": \"do_not_clear\"}" \
+            "https://api.render.com/v1/services/${SERVICE_ID}/deploys")
+          deploy_id=$(echo "$response" | jq -r '.id // empty')
+          if [ -z "$deploy_id" ]; then
+            echo "Render did not return a deploy id: $response" >&2
+            exit 1
+          fi
+          echo "deploy_id=$deploy_id" >> "$GITHUB_OUTPUT"
+          echo "Deploy $deploy_id started"
+
+      - name: Wait for it to go live
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID_PROD }}
+          DEPLOY_ID: ${{ steps.trigger.outputs.deploy_id }}
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 60); do
+            status=$(curl -sS \
+              -H "Authorization: Bearer ${RENDER_API_KEY}" \
+              "https://api.render.com/v1/services/${SERVICE_ID}/deploys/${DEPLOY_ID}" \
+              | jq -r '.status')
+            echo "  status: $status"
+            case "$status" in
+              live)
+                echo "Deploy is live"
+                exit 0
+                ;;
+              build_failed|update_failed|canceled|pre_deploy_failed)
+                echo "::error::Deploy finished as '$status'. See docs/runbooks/rollback.md." >&2
+                exit 1
+                ;;
+            esac
+            sleep 20
+          done
+          echo "::error::Deploy did not reach a terminal state within 20 minutes" >&2
+          exit 1
+
+      - name: Smoke check
+        env:
+          PROD_URL: ${{ vars.PROD_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PROD_URL:-}" ]; then
+            echo "::warning::PROD_URL is not set, so the deploy went unverified" >&2
+            exit 0
+          fi
+          for attempt in $(seq 1 10); do
+            if curl -fsS --max-time 30 "${PROD_URL}/readyz"; then
+              echo ""
+              echo "production is ready at ${PROD_URL}"
+              exit 0
+            fi
+            echo "  attempt ${attempt}: not ready yet"
+            sleep 15
+          done
+          echo "::error::Production did not become ready. Roll back: docs/runbooks/rollback.md" >&2
+          exit 1
