@@ -19,6 +19,7 @@ from promptproof_core.probes import Probe
 from promptproof_core.provider import ModelClient, ProviderError
 from promptproof_core.scrub import excerpt
 from promptproof_core.settings import Settings
+from promptproof_core.telemetry import set_attributes, span
 
 log = get_logger(__name__)
 
@@ -64,12 +65,22 @@ async def execute_probe(
 
     # ── Call the target ──────────────────────────────────────────────────────
     started = time.monotonic()
+    model = target.model or settings.default_target_model
     try:
-        completion = await client.complete(
-            model=target.model or settings.default_target_model,
-            system=target.system_prompt or "",
-            user=probe.payload,
-        )
+        with span("target.invoke", attributes={"model.id": model, "target.kind": target.kind}):
+            completion = await client.complete(
+                model=model,
+                system=target.system_prompt or "",
+                user=probe.payload,
+            )
+            # Length, not content: the response is evidence for the database,
+            # never for a span.
+            set_attributes(
+                **{
+                    "response.length": len(completion.text),
+                    "latency.ms": completion.latency_ms,
+                }
+            )
     except ProviderError as exc:
         elapsed = int((time.monotonic() - started) * 1000)
         log.warning(
@@ -83,12 +94,20 @@ async def execute_probe(
 
     # ── Judge the response ───────────────────────────────────────────────────
     try:
-        verdict = await evaluate(
-            client,
-            judge_model=settings.judge_model,
-            probe=probe,
-            response_text=completion.text,
-        )
+        with span("judge.evaluate", attributes={"judge.model": settings.judge_model}):
+            verdict = await evaluate(
+                client,
+                judge_model=settings.judge_model,
+                probe=probe,
+                response_text=completion.text,
+            )
+            set_attributes(
+                **{
+                    "verdict": verdict.outcome,
+                    "confidence": verdict.confidence,
+                    "latency.ms": verdict.latency_ms,
+                }
+            )
     except JudgeError as exc:
         log.warning("judge.errored", probe_id=probe.id, suite=probe.suite, reason=exc.reason)
         # The response is kept as evidence even though no verdict was reached:

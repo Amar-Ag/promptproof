@@ -9,11 +9,12 @@ import binascii
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, HTTPException, Request, Response, status
+from fastapi import APIRouter, HTTPException, Response, status
 from promptproof_core.logging import get_logger
 from promptproof_core.models import Finding, Scan, Target, TargetFamily
 from promptproof_core.probes import get_corpus
 from promptproof_core.suites import unknown_suites
+from promptproof_core.telemetry import current_traceparent, set_attributes, span
 from sqlalchemy import func, select
 from sqlalchemy.orm import aliased
 
@@ -63,49 +64,63 @@ def _decode_cursor(cursor: str) -> tuple[datetime, uuid.UUID]:
     status_code=status.HTTP_202_ACCEPTED,
     summary="Submit a scan",
 )
-async def submit_scan(payload: ScanCreate, session: SessionDep, request: Request) -> ScanCreated:
-    target = await session.get(Target, payload.target_id)
-    if target is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target not found")
+async def submit_scan(payload: ScanCreate, session: SessionDep) -> ScanCreated:
+    with span("scan.submit"):
+        target = await session.get(Target, payload.target_id)
+        if target is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target not found")
 
-    if unknown := unknown_suites(payload.suites):
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Unknown suite(s): {', '.join(unknown)}",
+        if unknown := unknown_suites(payload.suites):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Unknown suite(s): {', '.join(unknown)}",
+            )
+
+        corpus = get_corpus()
+        probes = corpus.for_suites(payload.suites)
+        if not probes:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="The selected suites contain no probes.",
+            )
+
+        # Serialised from this span and persisted on the row so the worker can
+        # continue this trace after the queue. Without it, submission and
+        # execution are two unrelated traces and the queue wait is invisible.
+        traceparent = current_traceparent()
+
+        scan = Scan(
+            target_id=target.id,
+            suites=list(dict.fromkeys(payload.suites)),
+            status="pending",
+            probe_count=len(probes),
+            probe_corpus_version=corpus.version,
+            traceparent=traceparent,
+        )
+        session.add(scan)
+        await session.flush()
+
+        set_attributes(
+            **{
+                "scan.id": str(scan.id),
+                "target.id": str(target.id),
+                "target.kind": target.kind,
+                "target.version": target.version,
+                "suite.count": len(scan.suites),
+                "probe.count": scan.probe_count,
+                "corpus.version": corpus.version,
+            }
         )
 
-    corpus = get_corpus()
-    probes = corpus.for_suites(payload.suites)
-    if not probes:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="The selected suites contain no probes.",
+        log.info(
+            "scan.submitted",
+            scan_id=str(scan.id),
+            target_id=str(target.id),
+            target_kind=target.kind,
+            suite_count=len(scan.suites),
+            probe_count=scan.probe_count,
         )
 
-    # Trace context is persisted on the row so the worker can continue this trace
-    # after the queue (docs/architecture.md). Phase 5 replaces the header read
-    # with the active span's context; the column contract does not change.
-    traceparent = request.headers.get("traceparent")
-
-    scan = Scan(
-        target_id=target.id,
-        suites=list(dict.fromkeys(payload.suites)),
-        status="pending",
-        probe_count=len(probes),
-        probe_corpus_version=corpus.version,
-        traceparent=traceparent,
-    )
-    session.add(scan)
-    await session.flush()
-
-    log.info(
-        "scan.submitted",
-        scan_id=str(scan.id),
-        target_id=str(target.id),
-        target_kind=target.kind,
-        suite_count=len(scan.suites),
-        probe_count=scan.probe_count,
-    )
     return ScanCreated(id=scan.id, status=scan.status, probe_count=scan.probe_count)
 
 
