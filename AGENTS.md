@@ -103,7 +103,7 @@ regardless of how well it works.
 | Models | Groq | Free tier, fast; target and judge use different model families on purpose |
 | Telemetry | OpenTelemetry SDK, exported to Logfire | Vendor-neutral instrumentation, hosted UI |
 | Tests | pytest, Vitest, Playwright | — |
-| Deploy | Fly.io, two apps (dev, production) | Docker-native, so Compose images deploy unchanged |
+| Deploy | Render free tier, two services, with Neon Postgres | No free tier offers an always-on worker, so the worker is co-located. See [ADR-0005](docs/adr/0005-free-tier-deployment.md). |
 
 Changing a locked row needs an ADR in [docs/adr](docs/adr) before the code change.
 

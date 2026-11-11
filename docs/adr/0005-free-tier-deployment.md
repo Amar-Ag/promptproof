@@ -1,6 +1,6 @@
 # ADR-0005 — Deploy on a free tier, co-locating the worker
 
-- **Status:** Proposed — supersedes the deployment row of the locked table in [AGENTS.md](../../AGENTS.md)
+- **Status:** Accepted — supersedes the deployment row of the locked table in [AGENTS.md](../../AGENTS.md)
 - **Date:** 2026-11-11
 - **Deciders:** sre, human
 
