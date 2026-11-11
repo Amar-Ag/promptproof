@@ -64,15 +64,22 @@ jobs:
             target="${REQUESTED}"
             echo "Using the deploy you specified: $target"
           else
-            # The second live deploy, not the first: the first is what is
-            # serving now, and rolling back to the current release would look
-            # like success while changing nothing.
-            target=$(echo "$deploys" | jq -r '[.[] | select(.deploy.status == "live")] | .[1].deploy.id // empty')
+            # Render marks a superseded deploy `deactivated`, not `live` — only
+            # the one currently serving is `live`. So "previously good" means
+            # live OR deactivated, and the current release is simply the first
+            # entry in this newest-first list.
+            #
+            # Filtering on `live` alone, as the first version of this did,
+            # matches exactly one deploy and can never find anything to roll
+            # back to. The drill caught it.
+            target=$(echo "$deploys" | jq -r '
+              [.[] | select(.deploy.status == "live" or .deploy.status == "deactivated")]
+              | .[1].deploy.id // empty')
             if [ -z "$target" ]; then
-              echo "::error::No earlier live deploy to roll back to. This service has only ever had one." >&2
+              echo "::error::No earlier successful deploy to roll back to. This service has only ever had one." >&2
               exit 1
             fi
-            echo "Rolling back to the previous live deploy: $target"
+            echo "Rolling back to the previous successful deploy: $target"
           fi
 
           echo "target=$target" >> "$GITHUB_OUTPUT"
