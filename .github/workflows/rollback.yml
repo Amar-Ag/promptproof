@@ -1,0 +1,119 @@
+# Roll an environment back to an earlier deploy.
+#
+# This exists because the runbook's curl commands need RENDER_API_KEY, and that
+# key lives in repository secrets rather than on anyone's laptop. A runbook step
+# you cannot actually run during an incident is not a runbook step.
+#
+# Rolling back production goes through the same approval gate as deploying to
+# it. A rollback is still a production change, and the 3am version of this
+# decision is exactly the one that benefits from a second pair of eyes.
+
+name: Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Which environment to roll back"
+        required: true
+        type: choice
+        options: [dev, production]
+      deploy_id:
+        description: "Deploy to roll back to (blank = the previous live deploy)"
+        required: false
+        type: string
+
+concurrency:
+  group: deploy-${{ inputs.environment }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  rollback:
+    name: Roll back ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+
+    # Resolves to the protected `production` environment when that is the
+    # target, so the reviewer gate applies to rollbacks too.
+    environment:
+      name: ${{ inputs.environment == 'production' && 'production' || 'development' }}
+      url: ${{ inputs.environment == 'production' && vars.PROD_URL || vars.DEV_URL }}
+
+    steps:
+      - name: Choose the deploy to restore
+        id: pick
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          SERVICE_ID: >-
+            ${{ inputs.environment == 'production'
+                && secrets.RENDER_SERVICE_ID_PROD
+                || secrets.RENDER_SERVICE_ID_DEV }}
+          REQUESTED: ${{ inputs.deploy_id }}
+        run: |
+          set -euo pipefail
+
+          deploys=$(curl -sS -H "Authorization: Bearer ${RENDER_API_KEY}" \
+            "https://api.render.com/v1/services/${SERVICE_ID}/deploys?limit=20")
+
+          echo "Recent deploys:"
+          echo "$deploys" | jq -r '.[] | "  \(.deploy.id)  \(.deploy.status)  \(.deploy.commit.id[0:7] // "-")"'
+
+          if [ -n "${REQUESTED}" ]; then
+            target="${REQUESTED}"
+            echo "Using the deploy you specified: $target"
+          else
+            # The second live deploy, not the first: the first is what is
+            # serving now, and rolling back to the current release would look
+            # like success while changing nothing.
+            target=$(echo "$deploys" | jq -r '[.[] | select(.deploy.status == "live")] | .[1].deploy.id // empty')
+            if [ -z "$target" ]; then
+              echo "::error::No earlier live deploy to roll back to. This service has only ever had one." >&2
+              exit 1
+            fi
+            echo "Rolling back to the previous live deploy: $target"
+          fi
+
+          echo "target=$target" >> "$GITHUB_OUTPUT"
+
+      - name: Roll back
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          SERVICE_ID: >-
+            ${{ inputs.environment == 'production'
+                && secrets.RENDER_SERVICE_ID_PROD
+                || secrets.RENDER_SERVICE_ID_DEV }}
+          TARGET: ${{ steps.pick.outputs.target }}
+        run: |
+          set -euo pipefail
+          response=$(curl -sS -X POST \
+            -H "Authorization: Bearer ${RENDER_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "{\"deployId\": \"${TARGET}\"}" \
+            "https://api.render.com/v1/services/${SERVICE_ID}/rollback")
+          echo "$response" | jq -r '"Rollback deploy: \(.id // "none returned")  status: \(.status // "-")"'
+          if [ -z "$(echo "$response" | jq -r '.id // empty')" ]; then
+            echo "::error::Render did not accept the rollback: $response" >&2
+            exit 1
+          fi
+
+      - name: Wait for the service to come back
+        env:
+          URL: ${{ inputs.environment == 'production' && vars.PROD_URL || vars.DEV_URL }}
+        run: |
+          set -euo pipefail
+          # A rollback restarts the container, and on a free instance the first
+          # request afterwards wakes it. Readiness is the signal that matters:
+          # it reports the database, which is what a bad rollback breaks.
+          for attempt in $(seq 1 20); do
+            if curl -fsS --max-time 30 "${URL}/readyz"; then
+              echo ""
+              echo "${URL} is serving again"
+              exit 0
+            fi
+            echo "  attempt ${attempt}: not ready yet"
+            sleep 15
+          done
+          echo "::error::Service did not come back after the rollback. See docs/runbooks/rollback.md." >&2
+          exit 1
