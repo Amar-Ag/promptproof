@@ -1,0 +1,86 @@
+# Render blueprint: both environments, created from this file.
+#
+# Deliberately `autoDeploy: false`. Render's own auto-deploy would push every
+# commit on the connected branch straight out, which would bypass the gates in
+# .github/workflows/deploy-prod.yml entirely. Deploys are triggered by those
+# workflows through Render's API, so CI and the approval gate stay in the path.
+#
+# Build target: Render builds the Dockerfile's final stage and has no
+# `--target`, so this relies on `serve` being last. That is asserted by
+# tests/unit/test_dockerfile.py rather than left to chance.
+#
+# Secrets are `sync: false`, meaning Render asks for the value when the service
+# is created and it is never written here. Nothing in this file is sensitive.
+
+services:
+  # ── Development ────────────────────────────────────────────────────────────
+  - type: web
+    name: promptproof-dev
+    runtime: docker
+    plan: free
+    # Same region as the Neon project (aws-us-east-2) to keep the database
+    # round trip short; on a free instance it is the one latency we control.
+    region: ohio
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /healthz
+    autoDeploy: false
+    envVars:
+      # The Neon `development` branch.
+      - key: DATABASE_URL
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: ENVIRONMENT
+        value: dev
+      - key: LOG_LEVEL
+        value: INFO
+      - key: DEFAULT_TARGET_MODEL
+        value: qwen/qwen3.8-27b
+      - key: JUDGE_MODEL
+        value: openai/gpt-oss-120b
+      # Lower than the local default of 4. Two model calls per probe against a
+      # free provider quota is how scans end up a third errored (#32), and a
+      # free instance has no spare CPU to gain from more anyway.
+      - key: SCAN_CONCURRENCY
+        value: "2"
+      # A free instance sleeps, so a worker can lose its lease mid-scan simply
+      # by being suspended. A longer lease stops that counting as an attempt.
+      - key: SCAN_LEASE_SECONDS
+        value: "600"
+      - key: SSRF_ALLOW_PRIVATE
+        value: "false"
+
+  # ── Production ─────────────────────────────────────────────────────────────
+  - type: web
+    name: promptproof-prod
+    runtime: docker
+    plan: free
+    region: ohio
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /healthz
+    autoDeploy: false
+    envVars:
+      # The Neon `production` branch — a different value from dev, which is
+      # what keeps the environments genuinely separate.
+      - key: DATABASE_URL
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: ENVIRONMENT
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
+      - key: DEFAULT_TARGET_MODEL
+        value: qwen/qwen3.8-27b
+      - key: JUDGE_MODEL
+        value: openai/gpt-oss-120b
+      - key: SCAN_CONCURRENCY
+        value: "2"
+      - key: SCAN_LEASE_SECONDS
+        value: "600"
+      # Asserted false at startup by Settings.assert_production_safe, so a
+      # mistake here stops the process rather than quietly widening egress.
+      - key: SSRF_ALLOW_PRIVATE
+        value: "false"

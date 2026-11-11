@@ -1,0 +1,111 @@
+# Continuous deployment to the development environment.
+#
+# Runs on every merge to main, with no human action. The gate is CI: this
+# workflow only runs after the CI workflow has concluded successfully on the
+# same commit, so a red build never reaches the dev URL.
+
+name: Deploy (dev)
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+concurrency:
+  group: deploy-dev
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy to dev
+    runs-on: ubuntu-latest
+    # `workflow_run` fires whatever the outcome, so the conclusion is checked
+    # rather than assumed.
+    if: github.event.workflow_run.conclusion == 'success'
+
+    environment:
+      name: development
+      url: ${{ vars.DEV_URL }}
+
+    steps:
+      - name: Trigger the Render deploy
+        id: trigger
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID_DEV }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          echo "Deploying ${SHA:0:7} to dev"
+          response=$(curl -sS -X POST \
+            -H "Authorization: Bearer ${RENDER_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d '{"clearCache": "do_not_clear"}' \
+            "https://api.render.com/v1/services/${SERVICE_ID}/deploys")
+          deploy_id=$(echo "$response" | jq -r '.id // empty')
+          if [ -z "$deploy_id" ]; then
+            # The body can carry an error message; it holds no secret.
+            echo "Render did not return a deploy id: $response" >&2
+            exit 1
+          fi
+          echo "deploy_id=$deploy_id" >> "$GITHUB_OUTPUT"
+          echo "Deploy $deploy_id started"
+
+      - name: Wait for it to go live
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID_DEV }}
+          DEPLOY_ID: ${{ steps.trigger.outputs.deploy_id }}
+        run: |
+          set -euo pipefail
+          # Free-tier builds are slow, and the container migrates before it
+          # serves, so this waits generously rather than reporting a false
+          # failure on a deploy that was merely taking its time.
+          for _ in $(seq 1 60); do
+            status=$(curl -sS \
+              -H "Authorization: Bearer ${RENDER_API_KEY}" \
+              "https://api.render.com/v1/services/${SERVICE_ID}/deploys/${DEPLOY_ID}" \
+              | jq -r '.status')
+            echo "  status: $status"
+            case "$status" in
+              live)
+                echo "Deploy is live"
+                exit 0
+                ;;
+              build_failed|update_failed|canceled|pre_deploy_failed)
+                echo "Deploy finished as: $status" >&2
+                exit 1
+                ;;
+            esac
+            sleep 20
+          done
+          echo "Deploy did not reach a terminal state within 20 minutes" >&2
+          exit 1
+
+      - name: Smoke check
+        env:
+          DEV_URL: ${{ vars.DEV_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DEV_URL:-}" ]; then
+            echo "DEV_URL is not set; skipping the smoke check" >&2
+            exit 0
+          fi
+          # A free instance may have just been woken by the deploy, so the
+          # first request can be slow. Readiness is what matters: it reports
+          # the database, which is the dependency most likely to be wrong.
+          for attempt in $(seq 1 10); do
+            if curl -fsS --max-time 30 "${DEV_URL}/readyz" ; then
+              echo ""
+              echo "dev is ready at ${DEV_URL}"
+              exit 0
+            fi
+            echo "  attempt ${attempt}: not ready yet"
+            sleep 15
+          done
+          echo "dev did not become ready" >&2
+          exit 1

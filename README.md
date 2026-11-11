@@ -99,13 +99,18 @@ make down
 
 ## Deployment
 
-Deployed on Fly.io, promoted through two apps:
+Two environments, both on free infrastructure: Render runs the application, Neon holds the database.
 
 | Environment | URL | How it deploys |
 |---|---|---|
-| dev | _TBD_ | Automatically, on every merge to `main` |
-| production | _TBD_ | Manually, via an approved workflow run |
+| dev | <https://promptproof-dev.onrender.com> | Automatically, after CI passes on `main` |
+| production | <https://promptproof-prod.onrender.com> | Manually, gated on CI and a reviewer's approval |
 
+Each environment is one container running the API and the worker as separate processes, with the API serving the built frontend from its own origin — so each is a single public URL with no CORS. The worker is co-located because no free tier offers an always-on background worker; what that costs is set out in [ADR-0005](docs/adr/0005-free-tier-deployment.md).
+
+Both run on free instances, which sleep after about fifteen minutes — the first request wakes one and takes roughly a minute. That is the tier, not a fault.
+
+Setup and deploy procedure: [docs/deployment.md](docs/deployment.md).
 Rollback procedure: [docs/runbooks/rollback.md](docs/runbooks/rollback.md).
 
 ## Observability and on-call

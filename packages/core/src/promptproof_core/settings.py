@@ -55,6 +55,10 @@ class Settings(BaseSettings):
     # ── API ───────────────────────────────────────────────────────────────────
     cors_allow_origins: list[str] = ["http://localhost:5173"]
 
+    # Where the built frontend lives, when the API serves it from its own origin
+    # (ADR-0005). Empty under Compose, where the frontend is its own container.
+    frontend_dir: str = ""
+
     def assert_judge_differs(self) -> None:
         """A model must never grade its own output.
 

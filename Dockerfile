@@ -1,8 +1,12 @@
 # Python image for both `api` and `worker`.
 #
-# Stages are targeted explicitly by compose. They have to be: a stage added at
-# the end of this file becomes the default build target, and a service with no
-# `target` would silently start running the test image instead of serving.
+# Stages are targeted explicitly by compose and by the deploy workflows. They
+# have to be: a stage added at the end of this file becomes the default build
+# target, and a service with no `target` would silently build the wrong one.
+#
+#   runtime  api and worker under Compose
+#   test     adds dev dependencies and the tests
+#   serve    one container running both processes, for deployment
 #
 # One image, two commands: the services share all their code through
 # packages/core, so building twice would only duplicate layers. Compose and Fly
@@ -72,3 +76,35 @@ RUN uv sync --frozen  && chown -R promptproof:promptproof /app /opt/venv
 USER promptproof
 
 CMD ["uv", "run", "--frozen", "pytest", "-q"]
+
+# ── Frontend build ───────────────────────────────────────────────────────────
+# Only used by the `serve` stage below. Compose builds `runtime` and never
+# touches this, so local builds do not pay for a Node toolchain.
+FROM node:22-alpine AS web-build
+
+WORKDIR /web
+COPY apps/web/package.json apps/web/package-lock.json ./
+RUN npm ci
+
+COPY apps/web/ ./
+# Empty base URL means the client issues same-origin relative requests, which
+# is the whole point of the API serving the UI: one public URL, no CORS.
+ENV VITE_API_BASE_URL=""
+RUN npm run build
+
+# ── Deployment image ─────────────────────────────────────────────────────────
+# One container running both processes, for the free tier (ADR-0005). Compose
+# does not use this stage; it runs api and worker as separate services.
+FROM runtime AS serve
+
+USER root
+COPY --from=web-build /web/dist /app/static
+COPY ops/docker/entrypoint-serve.sh /usr/local/bin/entrypoint-serve
+RUN chmod +x /usr/local/bin/entrypoint-serve  && chown -R promptproof:promptproof /app/static
+USER promptproof
+
+# Read by the API to decide whether to mount the UI. Set here rather than left
+# to the platform, because this stage is the reason it exists.
+ENV FRONTEND_DIR=/app/static
+
+CMD ["entrypoint-serve"]

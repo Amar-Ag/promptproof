@@ -7,10 +7,12 @@ model latency.
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from promptproof_core.db import check_connectivity, dispose_engine, init_engine
 from promptproof_core.logging import configure_logging, get_logger
 from promptproof_core.settings import Settings, get_settings
@@ -101,7 +103,57 @@ def create_app() -> FastAPI:
             content={"status": "ready" if ok else "not ready", "checks": checks},
         )
 
+    # Last, so every API and health route is matched before the catch-all.
+    _mount_frontend(app)
+
     return app
+
+
+def _mount_frontend(app: FastAPI) -> None:
+    """Serve the built frontend, when one is bundled.
+
+    In the free deployment tier the API serves the UI from its own origin, so
+    there is one public URL and no CORS (ADR-0005). Under Compose the frontend
+    is its own container, `FRONTEND_DIR` is unset, and this does nothing.
+
+    Two things here are easy to get wrong and were, the first time:
+
+    * This runs **last**. Mounting at `/` before the health routes are declared
+      makes the mount swallow `/healthz` and `/readyz`.
+    * `StaticFiles(html=True)` serves `index.html` for a *directory*, not for an
+      arbitrary path, so `/scans/<id>` would 404 even though it is a valid route
+      in the app. The catch-all below is what makes client-side routing work on
+      a hard refresh or a shared link.
+    """
+    configured = get_settings().frontend_dir
+    if not configured:
+        return
+
+    static = Path(configured)
+    if not (static / "index.html").is_file():
+        # Loud, because a deployment that silently serves no UI looks like a
+        # routing bug for as long as it takes someone to check the image.
+        log.warning("frontend.missing", path=str(static))
+        return
+
+    assets = static / "assets"
+    if assets.is_dir():
+        app.mount("/assets", StaticFiles(directory=assets), name="assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def frontend(full_path: str) -> FileResponse:
+        # An unmatched /api path is a genuine 404, not the app shell. Returning
+        # index.html with a 200 would turn a typo in a client call into a
+        # baffling "unexpected token <" at the other end.
+        if full_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="Not Found")
+
+        candidate = static / full_path
+        if full_path and candidate.is_file():
+            return FileResponse(candidate)
+        return FileResponse(static / "index.html")
+
+    log.info("frontend.mounted", path=str(static))
 
 
 app = create_app()
