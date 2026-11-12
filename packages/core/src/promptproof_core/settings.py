@@ -62,6 +62,30 @@ class Settings(BaseSettings):
     ssrf_allow_private: bool = False
     oncall_webhook_secret: str = ""
 
+    # ── On-call responder ─────────────────────────────────────────────────────
+    # The model it reasons with, kept separate from the judge so changing one is
+    # never a silent change to the other.
+    # Chosen by what survives a full tool loop, not by size.
+    #
+    # The responder calls tools and must then return a typed report.
+    # `openai/gpt-oss-20b` fails that last step -- Groq rejects the run with
+    # `output_parse_failed` after the tool calls -- so it is unusable here
+    # despite being the only model nothing else in this service touches.
+    # `openai/gpt-oss-120b` works but is the judge's model, and judging is the
+    # heaviest consumer of a per-model daily quota. This one completes the
+    # drill and leaves the judge's budget alone.
+    #
+    # Known weakness: on a free tier there is no model this service does not
+    # already use, so the responder still shares a daily quota with the
+    # workload it responds to. A day busy enough to cause an incident is a day
+    # that can starve the responder. Mitigated by sending one runbook rather
+    # than two and allowing a single retry; not solved. Override with
+    # ONCALL_MODEL if the two ever need separating properly.
+    oncall_model: str = "qwen/qwen3.8-27b"
+    oncall_repo: str = "Amar-Ag/promptproof"
+    # Needs issues:write and nothing else. It cannot deploy, merge or touch code.
+    oncall_github_token: str = ""
+
     # ── API ───────────────────────────────────────────────────────────────────
     cors_allow_origins: list[str] = ["http://localhost:5173"]
 

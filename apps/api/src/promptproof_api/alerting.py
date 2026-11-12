@@ -20,14 +20,19 @@ import asyncio
 from datetime import UTC, datetime
 
 import httpx
-from promptproof_core.alerts import Alert, Evaluator, evaluate_all, sign
+from promptproof_core.alerts import Alert, Evaluator, encode, evaluate_all, sign
 from promptproof_core.db import get_sessionmaker
 from promptproof_core.logging import get_logger
 from promptproof_core.settings import Settings
 
 log = get_logger(__name__)
 
+# A human channel is a chat webhook and answers immediately. The on-call
+# endpoint runs an agent that inspects the queue and works a runbook before it
+# replies, which takes tens of seconds. One timeout for both means either the
+# agent is cut off mid-run or a dead chat webhook holds the loop open.
 DELIVERY_TIMEOUT_SECONDS = 10.0
+ONCALL_TIMEOUT_SECONDS = 90.0
 
 
 async def deliver(alert: Alert, settings: Settings) -> None:
@@ -37,7 +42,7 @@ async def deliver(alert: Alert, settings: Settings) -> None:
     acting, and needs to be the one who notices when it does not.
     """
     payload = alert.payload()
-    targets: list[tuple[str, str, dict[str, str]]] = []
+    targets: list[tuple[str, str, dict[str, str], float]] = []
 
     if settings.alert_oncall_webhook_url:
         headers = {"Content-Type": "application/json"}
@@ -45,11 +50,18 @@ async def deliver(alert: Alert, settings: Settings) -> None:
             # The receiver can change production state, so it must be able to
             # tell a real alert from anyone who found the URL.
             headers["X-Promptproof-Signature"] = sign(payload, settings.oncall_webhook_secret)
-        targets.append(("oncall", settings.alert_oncall_webhook_url, headers))
+        targets.append(
+            ("oncall", settings.alert_oncall_webhook_url, headers, ONCALL_TIMEOUT_SECONDS)
+        )
 
     if settings.alert_human_webhook_url:
         targets.append(
-            ("human", settings.alert_human_webhook_url, {"Content-Type": "application/json"})
+            (
+                "human",
+                settings.alert_human_webhook_url,
+                {"Content-Type": "application/json"},
+                DELIVERY_TIMEOUT_SECONDS,
+            )
         )
 
     if not targets:
@@ -62,10 +74,20 @@ async def deliver(alert: Alert, settings: Settings) -> None:
         )
         return
 
-    async with httpx.AsyncClient(timeout=DELIVERY_TIMEOUT_SECONDS) as client:
-        for name, url, headers in targets:
+    # Serialised once, here, so the bytes that are signed are the bytes that
+    # are sent. Handing the payload to the client and letting it serialise
+    # separately produces a signature over something nobody receives.
+    body = encode(payload)
+
+    # Human first. The on-call call blocks for as long as the agent takes to
+    # work the runbook, and a person should not hear about an incident only
+    # after a machine has finished thinking about it.
+    targets.sort(key=lambda t: t[0] != "human")
+
+    async with httpx.AsyncClient() as client:
+        for name, url, headers, timeout in targets:
             try:
-                response = await client.post(url, json=payload, headers=headers)
+                response = await client.post(url, content=body, headers=headers, timeout=timeout)
                 response.raise_for_status()
                 log.info("alert.delivered", alert=alert.rule.name, target=name)
             except Exception as exc:

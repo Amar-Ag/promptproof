@@ -6,8 +6,9 @@ doing, and how work passes between them.
 
 Each development role is a real, invocable Claude Code subagent defined in
 [`.claude/agents/`](../../.claude/agents). The on-call responder is different: it is a
-production service that runs in response to alerts, and it lives in
-[`ops/oncall/`](../../ops/oncall).
+production service that runs in response to alerts. Its decision-making lives in
+[`packages/core/src/promptproof_core/oncall/`](../../packages/core/src/promptproof_core/oncall)
+and it is woken through a signed webhook on the API.
 
 ## Why a team rather than one agent
 
@@ -149,7 +150,8 @@ The main Claude Code thread, working with the human.
 
 A production agent, not a development one. Defined here because it is part of the team.
 
-- **Trigger:** an alert webhook, forwarded to `ops/oncall`.
+- **Trigger:** `POST /internal/oncall/alert`, authenticated by HMAC over the exact bytes
+  received. The endpoint fails closed: with no secret configured it refuses to run at all.
 - **Does:** reads the alert, pulls the relevant telemetry, follows the matching runbook,
   applies only the remediations it is explicitly authorised for, and files a GitHub issue
   recording the symptom, what it found, what it changed, and what it could not resolve.
@@ -161,6 +163,9 @@ A production agent, not a development one. Defined here because it is part of th
   filing the issue and paging the human.
 - **Quality bar:** every action is idempotent, and every run leaves a written trail whether or
   not it fixed anything.
+- **How the boundary is enforced:** by its toolset, not by its prompt. It has six typed tools
+  and no general query tool or shell, so an action outside the list cannot be expressed. See
+  [ADR-0006](../adr/0006-bounded-oncall-agent.md).
 
 ---
 
