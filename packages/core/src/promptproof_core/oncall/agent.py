@@ -39,10 +39,28 @@ class OnCallRunCancelled(Exception):
     paperwork, and then lets the cancellation stand.
     """
 
-    def __init__(self, report: "OnCallReport", tools_used: list[str]) -> None:
+    def __init__(self, report: "OnCallReport", runs: "list[ToolRun]") -> None:
         super().__init__("on-call run cancelled")
         self.report = report
-        self.tools_used = tools_used
+        self.runs = runs
+
+
+@dataclass(frozen=True, slots=True)
+class ToolRun:
+    """What one tool actually did.
+
+    Kept because the model's own account of its run cannot be trusted as the
+    audit trail. A live drill produced a report saying "Nothing" was changed
+    while `fail_exhausted_scans` had marked a scan failed in the same run: the
+    tools ran, the database changed, and the model simply did not mention it.
+
+    An on-call record assembled from a model's narration is a story. These are
+    the facts it is checked against.
+    """
+
+    name: str
+    summary: str
+    rows_changed: int | None
 
 
 @dataclass
@@ -50,6 +68,8 @@ class OnCallDeps:
     session: AsyncSession
     settings: Settings
     actions: list[str]
+    # What the tools actually did, as opposed to what the model says they did.
+    runs: list[ToolRun] = field(default_factory=list)
     # One database session, and a model that is free to ask for two tools in a
     # single turn. An AsyncSession cannot serve concurrent operations, so
     # parallel tool calls raise mid-run -- and the failure is worse than it
@@ -160,14 +180,26 @@ def build_agent(
         retries=1,
     )
 
-    def record(ctx: RunContext[OnCallDeps], name: str) -> None:
+    def record(ctx: RunContext[OnCallDeps], name: str, finding: remediations.Finding) -> None:
         """Called after the tool returns, never before.
 
         Recording on entry means a write that raised before its COMMIT is
         reported to the next reader as applied. For an interrupted run that
         inverts the very thing the report exists to get right.
+
+        The finding is kept, not just the name: `count` is the number of rows
+        this tool changed, and it is the only trustworthy answer to "what did
+        the responder do" when the report is written later.
         """
         ctx.deps.actions.append(name)
+        rows = finding.detail.get("count") if name in remediations.WRITE_ACTIONS else None
+        ctx.deps.runs.append(
+            ToolRun(
+                name=name,
+                summary=finding.summary,
+                rows_changed=int(rows) if isinstance(rows, int) else None,
+            )
+        )
 
     @agent.tool
     async def inspect_queue(ctx: RunContext[OnCallDeps]) -> dict[str, Any]:
@@ -177,7 +209,7 @@ def build_agent(
                 ctx.deps.session, ctx.deps.settings.scan_lease_seconds
             )
             result = {"summary": finding.summary, **finding.detail}
-        record(ctx, "inspect_queue")
+        record(ctx, "inspect_queue", finding)
         return result
 
     @agent.tool
@@ -187,7 +219,7 @@ def build_agent(
         async with ctx.deps.lock:
             finding = await remediations.inspect_worker_activity(ctx.deps.session)
             result = {"summary": finding.summary, **finding.detail}
-        record(ctx, "inspect_worker_activity")
+        record(ctx, "inspect_worker_activity", finding)
         return result
 
     @agent.tool
@@ -196,7 +228,7 @@ def build_agent(
         async with ctx.deps.lock:
             finding = await remediations.inspect_recent_failures(ctx.deps.session)
             result = {"summary": finding.summary, **finding.detail}
-        record(ctx, "inspect_recent_failures")
+        record(ctx, "inspect_recent_failures", finding)
         return result
 
     @agent.tool
@@ -209,7 +241,7 @@ def build_agent(
                 ctx.deps.settings.scan_max_attempts,
             )
             result = {"summary": finding.summary, **finding.detail}
-        record(ctx, "reclaim_expired_leases")
+        record(ctx, "reclaim_expired_leases", finding)
         return result
 
     @agent.tool
@@ -223,7 +255,7 @@ def build_agent(
                 ctx.deps.settings.scan_max_attempts,
             )
             result = {"summary": finding.summary, **finding.detail}
-        record(ctx, "fail_exhausted_scans")
+        record(ctx, "fail_exhausted_scans", finding)
         return result
 
     return agent
@@ -231,8 +263,12 @@ def build_agent(
 
 async def respond(
     alert: dict[str, Any], session: AsyncSession, settings: Settings
-) -> tuple[OnCallReport, list[str]]:
-    """Run the responder against one alert. Returns the report and the tools used."""
+) -> tuple[OnCallReport, list[ToolRun]]:
+    """Run the responder against one alert.
+
+    Returns the report and what the tools actually did. The second is not a
+    decoration on the first: it is what the written record is built from.
+    """
     agent = build_agent(settings.oncall_model, settings.groq_api_key, alert.get("alert"))
     deps = OnCallDeps(session=session, settings=settings, actions=[])
 
@@ -264,8 +300,8 @@ async def respond(
         )
         report = _interrupted(exc, deps.actions)
         if isinstance(exc, asyncio.CancelledError):
-            raise OnCallRunCancelled(report, list(deps.actions)) from exc
-        return report, deps.actions
+            raise OnCallRunCancelled(report, list(deps.runs)) from exc
+        return report, deps.runs
 
     log.info(
         "oncall.responded",
@@ -275,7 +311,7 @@ async def respond(
         escalate=result.output.escalate,
         tools_used=deps.actions,
     )
-    return result.output, deps.actions
+    return result.output, deps.runs
 
 
 def _interrupted(exc: BaseException, tools_used: list[str]) -> OnCallReport:

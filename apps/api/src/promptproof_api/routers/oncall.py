@@ -67,15 +67,15 @@ async def _respond_and_record(alert: dict[str, Any], settings: Settings) -> dict
         with span("oncall.respond", attributes={"alert": str(alert.get("alert"))}):
             try:
                 async with asyncio.timeout(RUN_TIMEOUT_SECONDS):
-                    report, tools_used = await respond(alert, session, settings)
+                    report, runs = await respond(alert, session, settings)
             except OnCallRunCancelled as cancelled:
                 # The run was cancelled after committing something. File the
                 # report it carries, then let the cancellation stand.
-                report, tools_used = cancelled.report, cancelled.tools_used
+                report, runs = cancelled.report, cancelled.runs
                 log.warning(
                     "oncall.cancelled",
                     alert=alert.get("alert"),
-                    tools_used=tools_used,
+                    tools_used=[r.name for r in runs],
                 )
             except Exception as exc:
                 # `respond` reports its own interruptions, so reaching here means
@@ -92,7 +92,7 @@ async def _respond_and_record(alert: dict[str, Any], settings: Settings) -> dict
                     escalate=True,
                     unresolved="A human needs to work the runbook manually.",
                 )
-                tools_used = []
+                runs = []
 
             set_attributes(
                 **{
@@ -109,7 +109,7 @@ async def _respond_and_record(alert: dict[str, Any], settings: Settings) -> dict
             settings.oncall_github_token,
             alert,
             report,
-            tools_used,
+            runs,
         )
     else:
         # Loud, because the written trail is half the point of the responder.

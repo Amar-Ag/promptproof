@@ -19,8 +19,24 @@ import json
 import httpx
 import pytest
 from promptproof_core.oncall import issues as issues_module
-from promptproof_core.oncall.agent import OnCallReport, _interrupted, prompt_for
+from promptproof_core.oncall.agent import (
+    OnCallReport,
+    ToolRun,
+    _interrupted,
+    prompt_for,
+)
 from promptproof_core.oncall.issues import file_issue, render
+
+INSPECTED = ToolRun(
+    name="inspect_queue", summary="3 pending, 1 with an expired lease", rows_changed=None
+)
+RECLAIMED = ToolRun(name="reclaim_expired_leases", summary="reclaimed 1 scan", rows_changed=1)
+FAILED_EXHAUSTED = ToolRun(
+    name="fail_exhausted_scans", summary="marked 1 exhausted scan as failed", rows_changed=1
+)
+MATCHED_NOTHING = ToolRun(
+    name="reclaim_expired_leases", summary="reclaimed 0 scans", rows_changed=0
+)
 
 ALERT = {
     "alert": "scan-queue-stalled",
@@ -42,7 +58,7 @@ class TestNothingChanged:
                 inspected=["queue: 0 pending, 0 stale leases"],
                 actions=[],
             ),
-            ["inspect_queue"],
+            [INSPECTED],
         )
         assert "Nothing." in body
         assert "inspect_queue" in body
@@ -60,7 +76,7 @@ class TestEscalation:
                 escalate=True,
                 unresolved="Restart the worker process group. I cannot start processes.",
             ),
-            ["inspect_worker_activity"],
+            [INSPECTED],
         )
         assert "## Escalating" in body
         assert "needs a human" in body
@@ -86,7 +102,7 @@ class TestNoContentLeaks:
                 inspected=["queue: 3 pending"],
                 actions=["reclaimed 1 scan"],
             ),
-            ["inspect_queue", "reclaim_expired_leases"],
+            [INSPECTED, RECLAIMED],
         )
         assert "sentinel-9f3" not in body
         assert "IGNORE ALL PREVIOUS" not in body
@@ -119,7 +135,11 @@ class TestInterruptedRun:
         assert "idempotent" in report.unresolved
 
     def test_the_partial_run_is_filed_as_an_escalation(self) -> None:
-        body = render(ALERT, _interrupted(RuntimeError("boom"), ["fail_exhausted_scans"]), ["x"])
+        body = render(
+            ALERT,
+            _interrupted(RuntimeError("boom"), ["fail_exhausted_scans"]),
+            [FAILED_EXHAUSTED],
+        )
         assert "## Escalating" in body
         assert "fail_exhausted_scans" in body
 
@@ -196,7 +216,7 @@ class TestFiling:
             "tok",
             ALERT,
             OnCallReport(branch="D2", diagnosis="x", actions=["reclaimed 1"]),
-            ["inspect_queue"],
+            [INSPECTED],
         )
 
         assert url == "https://github.com/o/r/issues/1"
@@ -234,3 +254,68 @@ class TestFiling:
         self._capture(monkeypatch, httpx.Response(503, json={"message": "down"}))
         url = await file_issue("o/r", "tok", ALERT, OnCallReport(branch="D2", diagnosis="x"), [])
         assert url is None
+
+
+class TestTheRecordIsNotTheModelsStory:
+    """The written record comes from the tools, not from the model's account.
+
+    This is not hypothetical. The first issue the responder ever filed said:
+
+        ## What I changed
+        **Nothing.** The condition did not call for any remediation...
+
+    while `fail_exhausted_scans` had, in that same run, marked an abandoned
+    scan `failed` — the database changed and the issue denied it. The model had
+    simply left `actions` empty, and the record was built from `actions`.
+
+    An on-call trail assembled from a model's narration is a story. These tests
+    pin it to the tool results instead, and keep the model's own account
+    visible beside them so a disagreement shows rather than being resolved
+    silently in the model's favour.
+    """
+
+    def test_a_write_is_recorded_even_when_the_model_does_not_mention_it(self) -> None:
+        body = render(
+            ALERT,
+            OnCallReport(branch="D2 stale lease", diagnosis="x", actions=[]),
+            [INSPECTED, FAILED_EXHAUSTED],
+        )
+        assert "fail_exhausted_scans" in body
+        assert "1 row(s)" in body
+        assert "**Nothing.** The condition did not call for" not in body
+
+    def test_a_write_that_matched_no_rows_is_not_claimed_as_a_change(self) -> None:
+        """The opposite error: a tool ran, changed nothing, and must not read
+        as a remediation."""
+        body = render(
+            ALERT,
+            OnCallReport(branch="D2", diagnosis="x", actions=["reclaimed everything"]),
+            [INSPECTED, MATCHED_NOTHING],
+        )
+        assert "ran and matched no rows" in body
+
+    def test_inspections_are_listed_from_what_the_tools_returned(self) -> None:
+        body = render(
+            ALERT,
+            OnCallReport(branch="D2", diagnosis="x", inspected=[]),
+            [INSPECTED],
+        )
+        assert "3 pending, 1 with an expired lease" in body
+        assert "_nothing was inspected_" not in body
+
+    def test_the_models_account_is_kept_but_marked_as_its_own(self) -> None:
+        """Kept, because a disagreement between the two is itself a signal."""
+        body = render(
+            ALERT,
+            OnCallReport(branch="D2", diagnosis="x", actions=["I reclaimed four hundred scans"]),
+            [RECLAIMED],
+        )
+        assert "Its own account:" in body
+        assert "I reclaimed four hundred scans" in body
+        assert "reclaim_expired_leases` — 1 row(s)" in body
+
+    def test_the_footer_does_not_claim_powers_it_no_longer_has(self) -> None:
+        """`requeue_transient_failures` was removed; the footer advertised it
+        for a while afterwards."""
+        body = render(ALERT, OnCallReport(branch="D2", diagnosis="x"), [INSPECTED])
+        assert "requeue" not in body.lower()

@@ -14,7 +14,8 @@ from typing import Any
 import httpx
 
 from ..logging import get_logger
-from .agent import OnCallReport
+from .agent import OnCallReport, ToolRun
+from .remediations import WRITE_ACTIONS
 
 log = get_logger(__name__)
 
@@ -22,8 +23,15 @@ GITHUB_API = "https://api.github.com"
 TIMEOUT_SECONDS = 20.0
 
 
-def render(alert: dict[str, Any], report: OnCallReport, tools_used: list[str]) -> str:
-    """The issue body. Numbers and names only — never scan content."""
+def render(alert: dict[str, Any], report: OnCallReport, runs: list[ToolRun]) -> str:
+    """The issue body. Numbers and names only — never scan content.
+
+    **What I changed** is built from what the tools returned, not from what the
+    model said about them. A live drill filed an issue reading "Nothing" was
+    changed while `fail_exhausted_scans` had marked a scan failed in the same
+    run. The model's own account is still printed, under its own heading, so a
+    disagreement between the two is visible rather than resolved silently.
+    """
     lines = [
         f"Woken by **`{alert.get('alert')}`** at {alert.get('fired_at')}.",
         "",
@@ -41,14 +49,33 @@ def render(alert: dict[str, Any], report: OnCallReport, tools_used: list[str]) -
         "## What I inspected",
         "",
     ]
-    lines += [f"- {item}" for item in report.inspected] or ["- _nothing recorded_"]
+    inspections = [r for r in runs if r.name not in WRITE_ACTIONS]
+    if inspections:
+        lines += [f"- `{r.name}` — {r.summary}" for r in inspections]
+    else:
+        lines += ["- _nothing was inspected_"]
+
+    if report.inspected:
+        lines += ["", "What it made of that:", ""]
+        lines += [f"- {item}" for item in report.inspected]
+
     lines += ["", "## What I changed", ""]
-    if report.actions:
-        lines += [f"- {item}" for item in report.actions]
+    writes = [r for r in runs if r.name in WRITE_ACTIONS]
+    applied = [r for r in writes if r.rows_changed]
+    if applied:
+        lines += [f"- `{r.name}` — {r.rows_changed} row(s): {r.summary}" for r in applied]
+    elif writes:
+        lines += [
+            "**Nothing.** " + ", ".join(f"`{r.name}`" for r in writes) + " ran and matched no rows."
+        ]
     else:
         lines += [
             "**Nothing.** The condition did not call for any remediation I am authorised to apply."
         ]
+
+    if report.actions:
+        lines += ["", "Its own account:", ""]
+        lines += [f"- {item}" for item in report.actions]
 
     if report.escalate:
         lines += [
@@ -66,11 +93,11 @@ def render(alert: dict[str, Any], report: OnCallReport, tools_used: list[str]) -
         "",
         "---",
         "",
-        f"Tools used: {', '.join(tools_used) if tools_used else 'none'}",
+        f"Tools used: {', '.join(r.name for r in runs) if runs else 'none'}",
         "",
-        "I can inspect the queue and recent failures, reclaim expired leases, fail exhausted "
-        "scans, and requeue transient failures. I cannot deploy, roll back, restart a process, "
-        "change configuration, alter the schema or delete anything.",
+        "I can inspect the queue, recent failures and worker activity, reclaim expired leases "
+        "and fail exhausted scans. I cannot deploy, roll back, restart a process, change "
+        "configuration, alter the schema or delete anything.",
     ]
     return "\n".join(lines)
 
@@ -80,7 +107,7 @@ async def file_issue(
     token: str,
     alert: dict[str, Any],
     report: OnCallReport,
-    tools_used: list[str],
+    runs: list[ToolRun],
 ) -> str | None:
     """Open the issue. Returns its URL, or None if it could not be filed.
 
@@ -100,7 +127,7 @@ async def file_issue(
                 },
                 json={
                     "title": title[:250],
-                    "body": render(alert, report, tools_used),
+                    "body": render(alert, report, runs),
                     "labels": labels,
                 },
             )

@@ -245,7 +245,7 @@ cause an incident is a day that can starve the responder. Worth knowing before t
 | Refuses and escalates when the fix needs a human | yes, worker restart |
 | A partial run reports what it had already changed | yes, after defect 3 |
 | Parallel tool calls are safe | yes, after defect 4 |
-| Issue filed on every run | **not yet — needs a token with `issues: write`** |
+| Issue filed on every run | yes — [#47](https://github.com/Amar-Ag/promptproof/issues/47) |
 | Survives a caller that gives up mid-run | yes, added in review |
 | Replayed alerts refused | yes, added in review |
 
@@ -307,3 +307,35 @@ verified, and two of the tests backing that write-up asserted less than their na
 one built its own lock rather than checking the agent took one, another grepped the source for
 a string. The endpoint that authenticates the whole path had no test at all. Running the thing
 found four defects; having someone else read it found four more.
+
+### 2026-11-12 — the first issue it filed was wrong
+
+With a token in place the responder filed [#46](https://github.com/Amar-Ag/promptproof/issues/46).
+The mechanism worked. The content did not:
+
+```
+## What I changed
+**Nothing.** The condition did not call for any remediation I am authorised to apply.
+```
+
+In that same run `fail_exhausted_scans` had marked an abandoned scan `failed`. The database
+changed and the issue denied it. `inspected` was empty too, though four tools had run, and the
+diagnosis was the single character `1`.
+
+Nothing was broken in the sense of raising. The report was assembled from `report.actions` —
+the model's own account of its run — and the model had simply left it empty. **An on-call
+record built from a model's narration is a story, not an audit trail**, and it is worth noticing
+that this failed in the safe-looking direction: the issue under-claimed. A model that
+over-claims produces the same class of document and is read the same way.
+
+The record is now built from what the tools returned: which ran, and how many rows each
+changed. The model's account is still printed, under its own heading, so a disagreement between
+the two is visible rather than quietly resolved in the model's favour.
+
+[#47](https://github.com/Amar-Ag/promptproof/issues/47) is the same drill after the fix —
+inspections listed from tool results, one row changed, both accounts agreeing.
+
+This is the third time in this feature that a report claimed nothing had happened when
+something had: once in the interrupted-run fallback, once in the router's fallback, once here.
+The lesson is not about any of those three code paths. It is that every path which writes the
+record has to take its facts from the tools.
