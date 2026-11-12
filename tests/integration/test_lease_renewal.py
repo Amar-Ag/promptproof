@@ -36,9 +36,7 @@ async def make_scan(session: AsyncSession) -> Scan:
     )
     session.add(target)
     await session.flush()
-    scan = Scan(
-        target_id=target.id, suites=["tool-abuse"], status="pending", probe_count=1
-    )
+    scan = Scan(target_id=target.id, suites=["tool-abuse"], status="pending", probe_count=1)
     session.add(scan)
     await session.commit()
     return scan
@@ -150,9 +148,7 @@ class TestItCannotBeAbused:
         assert await renew_lease(session, scan_id=scan.id, worker_id="worker-a")
         assert await renew_lease(session, scan_id=scan.id, worker_id="worker-a")
 
-    async def test_it_does_not_touch_the_attempt_count(
-        self, session: AsyncSession
-    ) -> None:
+    async def test_it_does_not_touch_the_attempt_count(self, session: AsyncSession) -> None:
         """A renewal is not a claim. Counting it as an attempt would retire a
         long scan through the attempt limit while it was running correctly."""
         scan = await make_scan(session)

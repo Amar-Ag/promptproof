@@ -12,6 +12,9 @@ tokens per minute, 1,000 requests per day, and 200,000 tokens per day. The
 per-minute limit is a pacing problem. The daily ones are not.
 """
 
+import asyncio
+import time
+
 import httpx
 import pytest
 from promptproof_core.provider import (
@@ -73,7 +76,24 @@ class TestParseReset:
         assert parsed is not None
         assert parsed == pytest.approx(expected)
 
-    @pytest.mark.parametrize("value", [None, "", "soon", "17", "1x2y"])
+    @pytest.mark.parametrize(
+        "value",
+        [
+            None,
+            "",
+            "soon",
+            "17",
+            "1x2y",
+            # These reach float() looking numeric and are not. Unguarded they
+            # raised a bare ValueError that escaped out of `complete()`, past
+            # `evaluate`'s ProviderError handler, and became a probe errored
+            # with "unexpected: ValueError" -- a malformed header from a proxy
+            # turning into an undetermined probe.
+            "1.2.3s",
+            "1m.2.3s",
+            "..s",
+        ],
+    )
     def test_anything_unrecognised_is_no_information_rather_than_zero(
         self, value: str | None
     ) -> None:
@@ -121,12 +141,53 @@ class TestClassification:
         assert completion.text == "ok"
         assert calls == 2
 
-    async def test_an_unreadable_body_is_treated_as_the_recoverable_case(self) -> None:
+    @pytest.mark.parametrize(
+        "body",
+        [
+            pytest.param(b"", id="empty"),
+            pytest.param(b"<html>429 Too Many Requests</html>", id="gateway-page"),
+            pytest.param(b'{"error": "a string, not an object"}', id="unexpected-shape"),
+            pytest.param(b'{"nope": 1}', id="no-error-field"),
+        ],
+    )
+    async def test_a_body_it_cannot_read_is_the_recoverable_case(self, body: bytes) -> None:
         """Refusing a scan that could have run costs the user their scan;
-        retrying a per-minute limit costs a wait."""
+        retrying a per-minute limit costs a wait. A 429 from a proxy rather than
+        from the provider is the realistic version of this."""
 
         def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(429, content=b"", headers={"retry-after": "0"})
+            return httpx.Response(429, content=body, headers={"retry-after": "0"})
+
+        client = client_for(handler, max_retries=1)
+        with pytest.raises(ProviderRateLimited):
+            await client.complete(model="m", system="s", user="u")
+        await client.aclose()
+
+    async def test_a_target_that_merely_mentions_a_daily_limit_is_not_one(self) -> None:
+        """The phrase "per day" is ordinary English, and the body may echo
+        the request back.
+
+        A target whose system prompt says "users may ask 5 questions per day"
+        must not turn a per-minute limit into a spent-allowance verdict: that
+        would stop every remaining probe and tell the user their day was over
+        when it was not. Classification reads `error.message`, and the bare
+        phrase counts only alongside the one that makes this a rate-limit
+        error."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                429,
+                json={
+                    "error": {
+                        "message": (
+                            "Too many requests. The system prompt under test reads: "
+                            "'users may ask 5 questions per day'."
+                        ),
+                        "code": "rate_limit_exceeded",
+                    }
+                },
+                headers={"retry-after": "0"},
+            )
 
         client = client_for(handler, max_retries=1)
         with pytest.raises(ProviderRateLimited):
@@ -213,6 +274,85 @@ class TestPacing:
         assert await budget.wait_for_room("target") == 0.0
         assert await budget.wait_for_room("judge") > 0
 
+    async def test_a_model_with_room_does_not_queue_behind_one_without(self) -> None:
+        """Per model means per lock, not only per dictionary key.
+
+        One shared lock made the separation true only sequentially: a target
+        call waiting out its window held the lock, so a judge call with
+        thousands of tokens to spare blocked for the whole wait and then
+        reported that it had not needed to wait at all. At two probes in flight
+        that roughly doubles a paced scan's wall time, which is in turn what
+        pushes the scan past its lease."""
+        budget = TokenBudget(floor=1500)
+        budget.observe(
+            "slow",
+            httpx.Headers(
+                {
+                    "x-ratelimit-remaining-tokens": "10",
+                    "x-ratelimit-reset-tokens": "400ms",
+                }
+            ),
+        )
+        budget.observe(
+            "fast",
+            httpx.Headers(
+                {
+                    "x-ratelimit-remaining-tokens": "7000",
+                    "x-ratelimit-reset-tokens": "30s",
+                }
+            ),
+        )
+
+        started = time.monotonic()
+        slow = asyncio.create_task(budget.wait_for_room("slow"))
+        await asyncio.sleep(0)  # let the slow waiter take its lock first
+        await budget.wait_for_room("fast")
+        fast_returned_after = time.monotonic() - started
+        await slow
+
+        assert fast_returned_after < 0.2, (
+            f"a model with budget to spare waited {fast_returned_after:.2f}s "
+            "behind a model that had none"
+        )
+
+    async def test_a_fresher_observation_during_a_wait_is_not_discarded(self) -> None:
+        """A response landing mid-wait may report a worse window than the
+        one being waited out.
+
+        The waiter used to clear the recorded allowance unconditionally on
+        waking, so that fresher number was thrown away, the next call saw no
+        information at all, and it fired straight into a spent allowance --
+        producing the undetermined probe this mechanism exists to prevent."""
+        budget = TokenBudget(floor=1500)
+        budget.observe(
+            "m",
+            httpx.Headers(
+                {
+                    "x-ratelimit-remaining-tokens": "100",
+                    "x-ratelimit-reset-tokens": "150ms",
+                }
+            ),
+        )
+
+        waiter = asyncio.create_task(budget.wait_for_room("m"))
+        await asyncio.sleep(0.02)
+        # A call already in flight reports a worse window than the one above.
+        budget.observe(
+            "m",
+            httpx.Headers(
+                {
+                    "x-ratelimit-remaining-tokens": "5",
+                    "x-ratelimit-reset-tokens": "10s",
+                }
+            ),
+        )
+        assert await waiter > 0
+
+        assert await budget.wait_for_room("m") > 0, (
+            "the next call was told there was room, having discarded a fresh "
+            "report that there was almost none"
+        )
+
     async def test_a_wait_is_bounded(self) -> None:
         """A provider reporting an eight-hour reset must not park a worker for
         eight hours holding a lease."""
@@ -236,17 +376,49 @@ class TestPacing:
         budget.observe("m", httpx.Headers({}))
         assert await budget.wait_for_room("m") == 0.0
 
-    async def test_a_429_is_observed_too(self) -> None:
-        """A refusal carries the allowance, and that is exactly when it
-        matters: the next call should wait rather than pile on."""
-        budget = TokenBudget(floor=1500)
-        budget.observe(
-            "m",
-            httpx.Headers(
-                {
-                    "x-ratelimit-remaining-tokens": "0",
-                    "x-ratelimit-reset-tokens": "20ms",
-                }
-            ),
+    async def test_the_allowance_on_a_refusal_is_recorded(self) -> None:
+        """A 429 carries the allowance, and that is exactly when it matters.
+
+        Driven through the client rather than by calling `observe` directly,
+        because the behaviour under test is that `observe` runs for refusals
+        and not only for successes. Reading it off a hand-built headers object
+        would still pass with that call moved inside the success branch."""
+        served: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if not served:
+                served.append("429")
+                return httpx.Response(
+                    429,
+                    json=TPM_BODY,
+                    headers={
+                        "retry-after": "0",
+                        "x-ratelimit-remaining-tokens": "12",
+                        "x-ratelimit-reset-tokens": "40ms",
+                    },
+                )
+            served.append("200")
+            return httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]},
+                headers={
+                    "x-ratelimit-remaining-tokens": "7000",
+                    "x-ratelimit-reset-tokens": "30s",
+                },
+            )
+
+        started = time.monotonic()
+        client = client_for(handler, max_retries=2)
+        completion = await client.complete(model="paced-model", system="s", user="u")
+        elapsed = time.monotonic() - started
+        await client.aclose()
+
+        assert completion.text == "ok"
+        assert served == ["429", "200"]
+        # The retry had to wait out the 40ms window the refusal reported. With
+        # `retry-after: 0` the backoff contributes nothing, so any wait here is
+        # the pacing having read the headers off the 429.
+        assert elapsed >= 0.04, (
+            f"the retry went out after {elapsed:.3f}s, so the allowance "
+            "reported on the refusal was never recorded"
         )
-        assert await budget.wait_for_room("m") > 0

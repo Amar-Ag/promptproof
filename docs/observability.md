@@ -25,7 +25,7 @@ One trace per scan, spanning two processes.
 |---|---|---|
 | `scan.submit` | api | `scan.id`, `target.id`, `target.version`, `target.kind`, `suite.count`, `probe.count` |
 | `scan.claim` | worker | `scan.id`, `worker.id`, `scan.attempt`, `queue.wait_ms` |
-| `scan.execute` | worker | `scan.id`, `probe.count`, `scan.concurrency` |
+| `scan.execute` | worker | `scan.id`, `probe.count`, `scan.concurrency`, `scan.quota_exhausted` |
 | `probe.execute` | worker | `probe.id`, `probe.suite`, `probe.severity`, `finding.outcome` |
 | `target.invoke` | worker | `target.kind`, `model.id`, `response.length`, `retry.count` |
 | `judge.evaluate` | worker | `judge.model`, `verdict`, `confidence`, `retry.count` |
@@ -81,8 +81,19 @@ API, never in telemetry.
 
 ## Service level objective
 
-95% of scans complete within 180 seconds of submission, measured over 7 days, with the
+95% of scans complete within **600 seconds** of submission, measured over 7 days, with the
 default suite selection. Alerting is derived from this, not from resource usage.
+
+This was 180 seconds, and that number assumed scans ran as fast as the provider would allow.
+They no longer do. Calls are paced against the allowance the provider reports, so a free-tier
+full-corpus scan spends most of its time waiting for a per-minute window to roll over: the
+first measured run took 234 seconds for 42 probes, and a single paced wait can be a minute of
+it. The old objective would have reported correct, deliberate waiting as a breach.
+
+600 seconds is 42 probes at the measured sustainable rate of roughly 19 probes per minute, with
+room for two windows lost to retries. It is a free-tier number: an account with a larger
+allowance paces less and finishes sooner, and this should be revisited rather than inherited if
+the tier changes.
 
 ## Alerts
 

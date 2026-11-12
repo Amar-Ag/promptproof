@@ -170,9 +170,7 @@ RETURNING id
 async def renew_lease(session: AsyncSession, *, scan_id: Any, worker_id: str) -> bool:
     """Extend this worker's claim. False means the claim is no longer ours."""
     row = (
-        await session.execute(
-            text(_RENEW_SQL).bindparams(scan_id=scan_id, worker_id=worker_id)
-        )
+        await session.execute(text(_RENEW_SQL).bindparams(scan_id=scan_id, worker_id=worker_id))
     ).first()
     await session.commit()
     return row is not None

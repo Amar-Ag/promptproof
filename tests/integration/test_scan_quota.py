@@ -16,10 +16,15 @@ and it is an exception because the condition is about the account rather than
 about anything the target did.
 """
 
+import httpx
 import pytest
 from promptproof_core.models import Finding, Scan, Target, TargetFamily
 from promptproof_core.probes import get_corpus
-from promptproof_core.provider import ProviderQuotaExhausted, ProviderRateLimited
+from promptproof_core.provider import (
+    GroqClient,
+    ProviderQuotaExhausted,
+    ProviderRateLimited,
+)
 from promptproof_core.queue import claim_next_scan
 from promptproof_core.settings import Settings
 from promptproof_worker.main import _execute
@@ -258,3 +263,124 @@ class TestAPartialScanClaimsNoCoverage:
         assert done.status == "completed"
         assert done.grade == "A"
         assert done.error is None
+
+
+# The provider's own phrasing. The scan-level path is reached from this body
+# rather than from a hand-raised exception, so a regression that emptied the
+# markers or stopped reading `error.message` is caught here and not only by a
+# unit test of the classifier.
+TPD_BODY = {
+    "error": {
+        "message": (
+            "Rate limit reached for model `openai/gpt-oss-120b` in organization "
+            "`org_redacted` service tier `on_demand` on tokens per day (TPD): "
+            "Limit 200000, Used 199446, Requested 1011. Please try again in 3m17s."
+        ),
+        "code": "rate_limit_exceeded",
+    }
+}
+
+
+def groq_client_serving(responses: list[httpx.Response]) -> GroqClient:
+    """A real `GroqClient` answering from a schedule of HTTP responses.
+
+    #32 asked for a stub provider that returns 429 on a schedule, and meant it:
+    the classifier is the part that decides whether a 429 stops the scan or
+    merely errors one probe, so a test that raises `ProviderQuotaExhausted`
+    directly has skipped the decision under test.
+    """
+    remaining = list(responses)
+    last = responses[-1]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return remaining.pop(0) if remaining else last
+
+    return GroqClient(
+        api_key="gsk_test_key_abcdefghijklmnop",
+        max_retries=1,
+        transport=httpx.MockTransport(handler),
+    )
+
+
+def ok_response(text: str) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={"choices": [{"message": {"content": text}, "finish_reason": "stop"}]},
+        headers={
+            "x-ratelimit-remaining-tokens": "7000",
+            "x-ratelimit-reset-tokens": "30s",
+        },
+    )
+
+
+def tpd_response() -> httpx.Response:
+    return httpx.Response(429, json=TPD_BODY, headers={"retry-after": "0"})
+
+
+class TestFromAnActual429:
+    """The whole path: HTTP 429 body -> classification -> scan-level condition."""
+
+    async def test_a_daily_limit_body_stops_the_scan(self, session: AsyncSession) -> None:
+        scan = await make_scan(session)
+        corpus = len(get_corpus().for_suites(SUITES))
+        client = groq_client_serving([tpd_response()])
+
+        done = await run(session, scan, client)  # type: ignore[arg-type]
+        await client.aclose()
+
+        assert done.status == "failed"
+        assert done.error is not None
+        assert "allowance" in done.error
+        assert await findings_of(session, done) == []
+        assert corpus > 1
+
+    async def test_a_per_minute_body_does_not_stop_the_scan(self, session: AsyncSession) -> None:
+        """The same status code, the opposite handling. If the classifier
+        stopped distinguishing them, this is the half that would break
+        silently: a scan abandoned over a limit that clears in a second."""
+        tpm = httpx.Response(
+            429,
+            json={
+                "error": {
+                    "message": (
+                        "Rate limit reached for model `qwen/qwen3.8-27b` on tokens "
+                        "per minute (TPM): Limit 8000, Used 7900, Requested 500."
+                    ),
+                    "code": "rate_limit_exceeded",
+                }
+            },
+            headers={"retry-after": "0"},
+        )
+        # One refusal, then the verdict JSON the judge needs, then plain text.
+        schedule = [tpm, ok_response(verdict_json(False, "stub verdict"))]
+        client = groq_client_serving([*schedule, ok_response("cheese only")])
+
+        scan = await make_scan(session)
+        done = await run(session, scan, client)  # type: ignore[arg-type]
+        await client.aclose()
+
+        assert done.status == "completed"
+        assert done.error is None, "a per-minute rate limit was reported as a spent daily allowance"
+
+    async def test_the_first_daily_limit_mid_scan_leaves_what_it_had(
+        self, session: AsyncSession
+    ) -> None:
+        """Serves a few probes, then reports the allowance spent."""
+        schedule = [
+            ok_response("cheese only"),
+            ok_response(verdict_json(False, "stub verdict")),
+            ok_response("cheese only"),
+            ok_response(verdict_json(False, "stub verdict")),
+            tpd_response(),
+        ]
+        client = groq_client_serving(schedule)
+
+        scan = await make_scan(session)
+        done = await run(session, scan, client)  # type: ignore[arg-type]
+        await client.aclose()
+
+        findings = await findings_of(session, done)
+        assert findings, "discarded results it had already obtained"
+        assert done.grade is None
+        assert done.error is not None
+        assert not [f for f in findings if f.outcome == "errored"]

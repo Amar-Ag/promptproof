@@ -88,7 +88,10 @@ exhausts its retries is recorded `errored` and the scan continues.
 
 **Acceptance criteria**
 
-- [ ] Every probe in the selected suites produces exactly one finding.
+- [ ] Every probe in the selected suites produces exactly one finding, **except** probes
+      that were never attempted because the provider's daily allowance was spent: an
+      unattempted probe is absent from the report rather than present as a failure it
+      never had. See R-002-7.
 - [ ] Probe calls run with at most `SCAN_CONCURRENCY` in flight, asserted by a stub provider
       recording peak concurrency.
 - [ ] A provider timeout produces a finding with `outcome = 'errored'` and does not fail the
@@ -144,6 +147,9 @@ findings using the worst-case table in [architecture.md](../architecture.md#grad
 - [ ] Each grade boundary has a unit test, including the single-`high`/two-`high` boundary.
 - [ ] A scan where every probe errored is `completed` with no grade and an errored count equal
       to the probe count, not graded `A`.
+- [ ] A scan that did not attempt every probe it selected carries **no grade**, whatever
+      the probes that did run returned. A grade asserts that the corpus was run; see
+      R-002-7.
 - [ ] `counts` reports exploited, resisted and errored totals per severity.
 - [ ] `finished_at` is set and `status` is `completed` in the same transaction as the grade.
 
@@ -166,3 +172,37 @@ response.
       a clear reason, not an unhandled exception.
 - [ ] A target becoming wholly unreachable fails the scan with `error` explaining it, rather
       than producing 40 errored findings.
+
+## R-002-7 — A spent provider allowance is one condition, not many failures
+
+**Story.** As a user, when my scan stops because the day's model allowance is gone, I want to
+be told that once — not handed a report whose gaps look like findings about my target.
+
+**Behaviour.** A provider rate limit and a spent provider allowance both arrive as HTTP 429.
+They are classified apart by what the provider's error message names: a per-minute limit is
+transient and retried, a per-day limit is not.
+
+When a daily allowance is met, the first probe to meet it stops the probes that have not
+started. The condition is recorded once on the scan. Probes that were never attempted are
+absent from the report. If nothing was graded the scan is `failed`; if some probes resolved the
+scan is `completed`, keeps those findings, and carries no grade.
+
+**Acceptance criteria**
+
+- [ ] A 429 naming a per-day limit is not retried; one naming a per-minute limit is.
+- [ ] A 429 body that cannot be read, or that names no limit, is treated as the per-minute
+      case: retrying costs a wait, refusing a scan that could have run costs the user their
+      scan.
+- [ ] The classification reads the provider's `error.message` field, and no provider text
+      reaches a stored or logged reason.
+- [ ] A scan stopped by a spent allowance records one scan-level condition and **no** errored
+      findings for probes it did not attempt.
+- [ ] Such a scan carries no grade, and the condition is visible in the API and the UI on a
+      `completed` scan as well as a `failed` one.
+- [ ] Both paths are exercised by a stub provider serving real 429 bodies on a schedule, not
+      by raising the classified exception directly.
+- [ ] Calls are paced against the allowance the provider reports (`x-ratelimit-remaining-tokens`,
+      `x-ratelimit-reset-tokens`) rather than against a guessed concurrency constant, keeping a
+      full-corpus scan under 5% errored on a free-tier account.
+- [ ] A scan's claim is renewed while it runs, so pacing cannot push it past its lease and have
+      it claimed by a second worker.

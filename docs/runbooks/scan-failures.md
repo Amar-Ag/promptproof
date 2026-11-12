@@ -110,8 +110,15 @@ SELECT id, status, grade, error
 - `status = 'completed'` with that error: partial. The findings it has are genuine and worth
   reading; the gap is how far the day's allowance got.
 
-The responder cannot fix either, and deliberately has no action for it: the only remedies are
-waiting, raising the tier, or pointing `JUDGE_MODEL` at a model with its own allowance. Note
+**Expect this alert when the allowance goes.** Once the day's allowance is spent, every
+submitted scan takes the failure path, so the failed share goes to 100% and
+`scan-failure-rate-high` fires within ten minutes — waking a human and the responder, whose
+only move here is to escalate. That is correct behaviour and not a second fault: a responder
+arriving at this runbook with a 100% failure rate and a pile of `%allowance%` errors has found
+the explanation, not a mystery.
+
+The responder cannot fix either case, and deliberately has no action for it: the only remedies
+are waiting, raising the tier, or pointing `JUDGE_MODEL` at a model with its own allowance. Note
 that the judge is the expensive call — about 410 tokens against 140 for the target — so it is
 the allowance that runs out first.
 

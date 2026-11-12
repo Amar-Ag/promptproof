@@ -54,6 +54,19 @@ class Settings(BaseSettings):
     # be low enough not to overshoot before the first response arrives.
     scan_concurrency: int = Field(default=2, ge=1, le=64)
     scan_lease_seconds: int = Field(default=300, ge=30)
+    # Pacing bounds. Both were constants in `provider.py`, which sat badly with
+    # the argument for pacing in the first place: the right numbers depend on
+    # the account, and an account is configuration.
+    #
+    # The floor is roughly three judge calls, so a call is held back while
+    # there is still room for the ones already in flight -- they are not yet
+    # counted in the number the provider gave us.
+    pacing_floor_tokens: int = Field(default=1500, ge=0)
+    # Capped below the lease on purpose. A provider reporting an eight-hour
+    # reset must not park a worker for eight hours, and a wait longer than the
+    # lease would hand the scan to someone else mid-sleep.
+    pacing_max_wait_seconds: float = Field(default=65.0, gt=0)
+
     scan_max_attempts: int = Field(default=3, ge=1, le=10)
     worker_poll_seconds: float = Field(default=2.0, gt=0)
     worker_id: str = "worker-1"

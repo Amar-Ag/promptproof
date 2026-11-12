@@ -123,17 +123,26 @@ def parse_reset(value: str | None) -> float | None:
     number = ""
     seen = False
     units = {"h": 3600.0, "m": 60.0, "s": 1.0}
-    for char in text:
-        if char.isdigit() or char == ".":
-            number += char
-        elif char in units:
-            if not number:
+    try:
+        for char in text:
+            if char.isdigit() or char == ".":
+                number += char
+            elif char in units:
+                if not number:
+                    return None
+                total += float(number) * units[char]
+                number = ""
+                seen = True
+            else:
                 return None
-            total += float(number) * units[char]
-            number = ""
-            seen = True
-        else:
-            return None
+    except ValueError:
+        # `1.2.3s` reaches float() looking numeric and is not. Unguarded, this
+        # escaped as a bare ValueError all the way out of `complete()` -- past
+        # `evaluate`, which catches only ProviderError -- and a malformed
+        # header from a provider or an intervening proxy became an errored
+        # probe reading "unexpected: ValueError". This function's one job is to
+        # answer "how long", and "I cannot tell" is one of the answers.
+        return None
     return total if seen and not number else None
 
 
@@ -143,17 +152,21 @@ class TokenBudget:
     Groq returns `x-ratelimit-remaining-tokens` and `x-ratelimit-reset-tokens`
     on every response. Reading them turns rate limiting from something we
     discover by being refused into something we can stay underneath, which is
-    the difference between a report with a third of its probes undetermined
-    and one without.
+    the difference between a report with a third of its probes undetermined and
+    one without.
 
     This is deliberately not a guessed concurrency constant. The sustainable
     rate depends on the account, the model and the length of the probes, none
     of which this repository knows. The provider does, and it says so on every
     call.
 
-    Per model, because the allowance is per model: a scan's target calls and
-    its judge calls draw on separate budgets, and the judge's is the one that
-    runs out first -- it is the more expensive call.
+    Per model throughout -- the allowance is per model, and so is the lock. A
+    scan's target calls and its judge calls draw on separate budgets, the
+    judge's running out first because it is the more expensive call. One shared
+    lock made that untrue in the way that mattered: a target call waiting out
+    its window held the lock, so a judge call with nine thousand tokens to
+    spare blocked behind it for the full wait and then returned "no wait
+    needed". Two models, two locks.
     """
 
     def __init__(self, floor: int = 1500, max_wait_seconds: float = 65.0) -> None:
@@ -164,7 +177,17 @@ class TokenBudget:
         self._max_wait = max_wait_seconds
         self._remaining: dict[str, int] = {}
         self._ready_at: dict[str, float] = {}
-        self._lock = asyncio.Lock()
+        # Bumped on every observation, so a waiter can tell whether the numbers
+        # it decided to wait on are still the newest ones.
+        self._generation: dict[str, int] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
+
+    def _lock_for(self, model: str) -> asyncio.Lock:
+        lock = self._locks.get(model)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._locks[model] = lock
+        return lock
 
     def observe(self, model: str, headers: Any) -> None:
         """Record the allowance reported alongside a response."""
@@ -176,6 +199,7 @@ class TokenBudget:
         except (TypeError, ValueError):
             return
         self._remaining[model] = remaining
+        self._generation[model] = self._generation.get(model, 0) + 1
         reset = parse_reset(headers.get("x-ratelimit-reset-tokens"))
         if reset is not None:
             self._ready_at[model] = time.monotonic() + reset
@@ -183,10 +207,10 @@ class TokenBudget:
     async def wait_for_room(self, model: str) -> float:
         """Hold a call back if the reported allowance is nearly spent.
 
-        Returns the seconds waited, for the caller to log. Serialised, so that
-        a burst of probes does not each independently decide there is room.
+        Returns the seconds waited, for the caller to log. Serialised per model
+        so a burst of probes does not each independently decide there is room.
         """
-        async with self._lock:
+        async with self._lock_for(model):
             remaining = self._remaining.get(model)
             if remaining is None or remaining >= self._floor:
                 return 0.0
@@ -196,6 +220,8 @@ class TokenBudget:
             delay = min(max(ready_at - time.monotonic(), 0.0), self._max_wait)
             if delay <= 0:
                 return 0.0
+
+            generation = self._generation.get(model, 0)
             log.info(
                 "provider.pacing",
                 model=model,
@@ -203,38 +229,54 @@ class TokenBudget:
                 waiting_seconds=round(delay, 2),
             )
             await asyncio.sleep(delay)
-            # The window has rolled over; the next response will tell us the
-            # new allowance, and until then this model is not held back again.
-            self._remaining.pop(model, None)
-            self._ready_at.pop(model, None)
+
+            # Clear only if nothing newer arrived while we slept. Responses
+            # from calls already in flight land during the wait, and one of
+            # them may report a window that is *worse* than the one we just
+            # waited out. Discarding it unconditionally meant the next call saw
+            # no information at all and fired straight into a spent allowance
+            # -- producing exactly the undetermined probe this exists to stop.
+            if self._generation.get(model, 0) == generation:
+                self._remaining.pop(model, None)
+                self._ready_at.pop(model, None)
             return delay
 
 
-DAILY_LIMIT_MARKERS = (
-    "per day",
-    "(tpd)",
-    "(rpd)",
-)
+# Markers that name a *daily* allowance. `(tpd)` and `(rpd)` are Groq's own
+# codes; "per day" alone is ordinary English and is accepted only alongside
+# the phrase that makes the body a rate-limit error.
+DAILY_LIMIT_CODES = ("(tpd)", "(rpd)")
+DAILY_LIMIT_PHRASE = "per day"
+RATE_LIMIT_PHRASE = "rate limit reached"
 
 
 def _names_a_daily_limit(response: httpx.Response) -> bool:
     """Whether a 429 is about a daily allowance rather than a per-minute rate.
 
-    Groq says which limit was hit in the error message -- "on tokens per day
-    (TPD)" against "on tokens per minute (TPM)". That single distinction
-    decides whether waiting is worth anything.
+    Groq says which limit was hit -- "on tokens per day (TPD)" against "on
+    tokens per minute (TPM)" -- and that single distinction decides whether
+    waiting is worth anything.
 
-    Matched case-insensitively against fixed markers and nothing more: the body
-    is provider text that may echo the request, so it is read to classify and
-    never quoted. A body we cannot read is treated as the recoverable case,
-    because retrying a per-minute limit costs a wait while refusing a scan that
-    could have run costs the user their scan.
+    Read from the `error.message` field rather than from the whole body, and
+    matched against fixed markers. The body is provider text that may echo the
+    request back, and "per day" is a phrase a system prompt can easily contain:
+    a target told "users may ask 5 questions per day" would otherwise turn an
+    ordinary per-minute limit into a spent-allowance verdict, stop every
+    remaining probe, and tell the user their day was over when it was not.
+
+    Matched to classify and never quoted. A body we cannot read is treated as
+    the recoverable case, because retrying a per-minute limit costs a wait
+    while refusing a scan that could have run costs the user their scan.
     """
     try:
-        body = response.text.lower()
+        body = response.json()
+        message = str(body["error"]["message"]).lower()
     except Exception:
         return False
-    return any(marker in body for marker in DAILY_LIMIT_MARKERS)
+
+    if any(code in message for code in DAILY_LIMIT_CODES):
+        return True
+    return DAILY_LIMIT_PHRASE in message and RATE_LIMIT_PHRASE in message
 
 
 class GroqClient:
@@ -251,6 +293,8 @@ class GroqClient:
         max_retries: int = 3,
         base_url: str = GROQ_BASE_URL,
         transport: httpx.AsyncBaseTransport | None = None,
+        pacing_floor: int = 1500,
+        pacing_max_wait: float = 65.0,
     ) -> None:
         if not api_key:
             raise ValueError("GROQ_API_KEY is not set; the worker cannot call a model.")
@@ -259,7 +303,7 @@ class GroqClient:
         register_secret(api_key)
 
         self._max_retries = max_retries
-        self._budget = TokenBudget()
+        self._budget = TokenBudget(floor=pacing_floor, max_wait_seconds=pacing_max_wait)
         self._client = httpx.AsyncClient(
             base_url=base_url,
             timeout=httpx.Timeout(timeout_seconds, connect=10.0),
@@ -414,4 +458,8 @@ def build_client(
         timeout_seconds=settings.model_timeout_seconds,
         max_retries=settings.model_max_retries,
         transport=transport,
+        pacing_floor=settings.pacing_floor_tokens,
+        # Never longer than the lease: a wait that outlives the claim hands the
+        # scan to another worker while this one is still asleep holding it.
+        pacing_max_wait=min(settings.pacing_max_wait_seconds, settings.scan_lease_seconds / 2.0),
     )

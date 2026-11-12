@@ -197,7 +197,11 @@ async def _run_probes(
                     log.error(
                         "scan.quota_exhausted",
                         probe_id=probe.id,
-                        remaining_probes=len(probes),
+                        # What was asked for, not what is left: the count of
+                        # unfinished probes is not knowable here without racing
+                        # the tasks still resolving. `scan.partial` reports the
+                        # graded total once they have all settled.
+                        probes_requested=len(probes),
                     )
                     quota_spent.set()
                 return None
@@ -260,14 +264,21 @@ async def _complete(
 
     # Measured from submission, not from claim: the queue wait is part of what
     # the person waited through.
+    # `scan.grade`, not `grade`: a scan that did not cover the corpus is stored
+    # with no grade, and a metric reporting the arithmetic result anyway would
+    # count uncovered scans as As on any grade-distribution dashboard -- and
+    # contradict the row a responder is told to read.
     record_scan_completed(
-        "completed", grade, int((scan.finished_at - scan.queued_at).total_seconds() * 1000)
+        "completed",
+        scan.grade,
+        int((scan.finished_at - scan.queued_at).total_seconds() * 1000),
     )
 
     log.info(
         "scan.completed",
         scan_id=str(scan.id),
-        grade=grade,
+        grade=scan.grade,
+        graded=scan.grade is not None,
         total=counts.total,
         errored=counts.errored,
     )
