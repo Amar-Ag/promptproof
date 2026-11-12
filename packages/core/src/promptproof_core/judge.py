@@ -14,7 +14,7 @@ from dataclasses import dataclass
 
 from .logging import get_logger
 from .probes import Probe
-from .provider import Completion, ModelClient, ProviderError
+from .provider import Completion, ModelClient, ProviderError, ProviderQuotaExhausted
 from .scrub import excerpt
 
 log = get_logger(__name__)
@@ -152,6 +152,12 @@ async def evaluate(
                 user=prompt if attempt == 1 else prompt + "\nReply with JSON only.",
                 json_object=True,
             )
+        except ProviderQuotaExhausted:
+            # Not a judge failure. The day's allowance is spent, which is a
+            # condition of the account and the same for every remaining probe,
+            # so it travels up to be handled once at scan level rather than
+            # becoming this probe's error message.
+            raise
         except ProviderError as exc:
             raise JudgeError(exc.reason) from exc
 

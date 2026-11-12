@@ -17,7 +17,7 @@ from promptproof_core.logging import get_logger
 from promptproof_core.metrics import record_judge_error, record_target_error
 from promptproof_core.models import Target
 from promptproof_core.probes import Probe
-from promptproof_core.provider import ModelClient, ProviderError
+from promptproof_core.provider import ModelClient, ProviderError, ProviderQuotaExhausted
 from promptproof_core.scrub import excerpt
 from promptproof_core.settings import Settings
 from promptproof_core.telemetry import set_attributes, span
@@ -82,6 +82,12 @@ async def execute_probe(
                     "latency.ms": completion.latency_ms,
                 }
             )
+    except ProviderQuotaExhausted:
+        # Deliberately not turned into an errored finding. Every remaining
+        # probe would produce the identical one, and 32 copies of "the
+        # allowance is spent" read as findings about the target when they are
+        # facts about the account. Handled once, at scan level.
+        raise
     except ProviderError as exc:
         elapsed = int((time.monotonic() - started) * 1000)
         record_target_error(exc.reason)

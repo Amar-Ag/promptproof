@@ -30,7 +30,8 @@ SELECT error, count(*)
 Compare `promptproof.target.errors` and `promptproof.judge.errors` by `reason` over the same
 window.
 
-- Mostly `429` → **D1 (provider rate limited)**
+- Mostly `429` → **D1 (provider rate limited)** or **D6 (allowance spent)**; the two are
+  distinguished below and the fix differs
 - Mostly `timeout` → **D2 (provider degraded)**
 - Mostly `parse` on the judge → **D3 (judge output malformed)**
 - Mostly guard refusals → **D4 (endpoint target unreachable or unsafe)**
@@ -59,20 +60,60 @@ Onset matching a release → **D5**.
 
 ## Remediations
 
-### D1 — provider rate limited · `AGENT`
+### First, tell the two 429s apart
 
-Reduce `SCAN_CONCURRENCY` to 2. Requeue scans that failed on a transient reason, within the
-attempt limit — idempotent, since the predicate excludes anything already requeued:
+Both a momentary rate limit and a spent daily allowance arrive as HTTP 429, and the useful
+response is opposite in each case. Groq says which in its error message, and the code acts on
+it (`_names_a_daily_limit` in `provider.py`):
+
+| Limit | Named as | Classified | Behaviour |
+|---|---|---|---|
+| Tokens or requests per minute | `(TPM)`, `(RPM)`, "per minute" | `ProviderRateLimited`, transient | retried with backoff, honouring `Retry-After` |
+| Tokens or requests per day | `(TPD)`, `(RPD)`, "per day" | `ProviderQuotaExhausted`, **not** transient | not retried; stops the scan |
+
+A body that cannot be read is treated as the per-minute case: retrying costs a wait, whereas
+refusing a scan that could have run costs the user their scan.
+
+### D1 — provider rate limited (per minute) · `AGENT`
+
+**Normally there is nothing to do.** `TokenBudget` in `provider.py` paces against the
+allowance the provider reports on every response — `x-ratelimit-remaining-tokens` and
+`x-ratelimit-reset-tokens` — so calls wait before being refused rather than after. A handful
+of `429`s in the logs with no errored findings is that mechanism working.
+
+**Scans are slower than they used to be, on purpose.** Pacing trades wall-clock time for
+results that exist. On a free tier a full-corpus scan now spends most of its time waiting for
+the per-minute window to roll over — a single `provider.pacing` line reading
+`remaining_tokens=375 waiting_seconds=57` is the mechanism choosing a minute of waiting over a
+handful of probes that would have come back undetermined. If someone reports scans as "slow",
+check for those lines before treating it as a fault.
+
+If errored findings *are* appearing, the burst is outrunning the pacing. Lower
+`SCAN_CONCURRENCY` (default 2, chosen against a measured 8,000 tokens per minute per model;
+the reasoning is in `settings.py`). Scans that already failed can be re-run by the user; there
+is no requeue action — see [#45](https://github.com/Amar-Ag/promptproof/issues/45) for why a
+transient reason never reaches a scan row today.
+
+### D6 — daily allowance spent · `HUMAN`
+
+The scan stopped on its own and says so:
 
 ```sql
-UPDATE scans
-   SET status = 'pending', locked_at = NULL, locked_by = NULL, error = NULL
- WHERE status = 'failed'
-   AND finished_at > now() - interval '30 minutes'
-   AND error ILIKE '%rate limit%'
-   AND attempts < 3
-RETURNING id;
+SELECT id, status, grade, error
+  FROM scans
+ WHERE error ILIKE '%allowance%'
+   AND finished_at > now() - interval '1 day';
 ```
+
+- `status = 'failed'` with that error: nothing was graded, and the cause is the account rather
+  than the target. Nothing to fix; the allowance resets.
+- `status = 'completed'` with that error: partial. The findings it has are genuine and worth
+  reading; the gap is how far the day's allowance got.
+
+The responder cannot fix either, and deliberately has no action for it: the only remedies are
+waiting, raising the tier, or pointing `JUDGE_MODEL` at a model with its own allowance. Note
+that the judge is the expensive call — about 410 tokens against 140 for the target — so it is
+the allowance that runs out first.
 
 ### D2 — provider degraded · `AGENT`
 
@@ -96,10 +137,11 @@ Roll back via [rollback.md](rollback.md), then open an issue with the failing re
 
 ## Agent boundaries
 
-The on-call agent may apply **D1**, **D2**, and the diagnosis-only path of **D4**. It never
-rolls back, changes the judge configuration, or edits a target. Every run files an issue
-recording which branch matched, what it changed, the rows affected, and whether the failure
-rate recovered.
+The on-call agent may diagnose any of these and has **no remediation for this alert at all**:
+a scan only fails when it is abandoned, its target is gone, or the day's allowance ran out, and
+none of those is something it can fix. It inspects, reports the dominant reason and whether the
+failures are concentrated on one target, and escalates. It never rolls back, changes the judge
+configuration, or edits a target. Every run files an issue.
 
 ## Exercise log
 
@@ -151,3 +193,39 @@ Neither defect would have been found by the unit tests. They fed the evaluator s
 values at times of their choosing, so nothing ever aged out underneath it and nothing ever
 checked which window was actually used. Both are now pinned by integration tests that were
 verified to fail against the old behaviour.
+
+### 2026-11-12 — pacing, measured
+
+The limits this is built against, read from the provider rather than guessed: **8,000 tokens
+per minute per model**, 1,000 requests per day, and 200,000 tokens per day. A probe costs two
+calls against two different models — about 140 tokens to the target, about 410 to the judge,
+the judge being the expensive one because it reasons about the exchange. At 8,000 per minute
+the judge allows roughly 19 probes a minute, and that is the binding constraint.
+
+| Run | Probes | Errored | |
+|---|---|---|---|
+| Hardened prompt, before (#32) | 32 | 5 | 16% |
+| Naive prompt, before (#32) | 32 | 11 | 34% |
+| Full corpus, after | **42** | **0** | **0%** |
+
+The scan took 3.9 minutes and produced a real verdict (grade D). Most of that time was spent
+waiting: `provider.pacing model=openai/gpt-oss-20b remaining_tokens=375 waiting_seconds=57` is
+the mechanism choosing a minute of waiting over a handful of probes that would have come back
+undetermined. **Scans are slower now, deliberately.**
+
+One honest caveat about this measurement. It used `openai/gpt-oss-20b` as the judge, because
+the production judge's daily allowance had already been spent by other work the same day. The
+pacing reads the allowance the provider reports and knows nothing about which model it is
+pacing, so the mechanism is the same — but the number above was not produced with the
+production judge, and that is worth knowing before quoting it.
+
+The spent-allowance path was exercised for real on the way there: a full-corpus scan against
+the exhausted judge stopped after 4 probes and reported one scan-level condition. Under the
+old behaviour the remaining 38 would each have retried three times and arrived as 38 identical
+errored findings — 90% of the report, none of it about the target.
+
+That run also exposed something the issue had not asked about: the partial scan reported
+**grade A**. The four probes that ran had all resisted, so the arithmetic was right and the
+headline was indefensible — "this target resisted everything", over a scan that never attempted
+nine-tenths of the corpus. The caveat was recorded on the scan, but nobody reads a caveat
+before a letter. A scan that does not cover the corpus now carries no grade.
