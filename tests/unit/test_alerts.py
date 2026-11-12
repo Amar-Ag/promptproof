@@ -43,7 +43,11 @@ class TestRules:
         assert QUEUE_STALLED.threshold == 120.0
         assert QUEUE_STALLED.sustain_seconds == 300
         assert FAILURE_RATE_HIGH.threshold == 0.20
-        assert FAILURE_RATE_HIGH.sustain_seconds == 600
+        # The ten minutes is the measurement window, not an extra sustain on
+        # top of it. Conflating them makes the rule unfireable, because the
+        # failures age out of the window while the sustain is still counting.
+        assert FAILURE_RATE_HIGH.window_seconds == 600
+        assert FAILURE_RATE_HIGH.sustain_seconds < FAILURE_RATE_HIGH.window_seconds
 
 
 class TestFiring:
@@ -109,9 +113,9 @@ class TestFiring:
         e.observe(FAILURE_RATE_HIGH, 0.9, at(0))
 
         assert e.observe(QUEUE_STALLED, 500.0, at(301)) is not None
-        # The failure rule has a longer window and must not fire with it.
-        assert e.observe(FAILURE_RATE_HIGH, 0.9, at(301)) is None
-        assert e.observe(FAILURE_RATE_HIGH, 0.9, at(601)) is not None
+        # Different sustain windows, tracked separately.
+        assert e.observe(FAILURE_RATE_HIGH, 0.9, at(30)) is None
+        assert e.observe(FAILURE_RATE_HIGH, 0.9, at(61)) is not None
 
 
 class TestPayload:
