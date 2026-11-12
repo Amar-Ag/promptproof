@@ -16,15 +16,24 @@ Two properties matter more than anything else here:
 import asyncio
 import signal
 import sys
+import time
 from datetime import UTC, datetime
 
 from promptproof_core.db import dispose_engine, get_sessionmaker, init_engine
 from promptproof_core.grading import grade_findings
 from promptproof_core.logging import bind_scan, clear_context, configure_logging, get_logger
+from promptproof_core.metrics import (
+    configure_metrics,
+    record_probe,
+    record_reclaim,
+    record_scan_completed,
+    set_queue_snapshot,
+    shutdown_metrics,
+)
 from promptproof_core.models import Finding, Scan, Target
 from promptproof_core.probes import Probe, get_corpus
 from promptproof_core.provider import GroqClient, ModelClient, build_client
-from promptproof_core.queue import claim_next_scan, fail_exhausted_scans
+from promptproof_core.queue import claim_next_scan, fail_exhausted_scans, queue_stats
 from promptproof_core.settings import Settings, get_settings
 from promptproof_core.telemetry import (
     configure_telemetry,
@@ -42,6 +51,12 @@ from .executor import ProbeResult, execute_probe
 log = get_logger(__name__)
 
 _shutdown = asyncio.Event()
+
+# Refreshed each poll and read by the queue gauges. The callback that
+# OpenTelemetry invokes is synchronous and runs on its own thread, so it
+# cannot await a session — it reads this snapshot instead, and a slow
+# database therefore cannot stall metric collection.
+_QUEUE_SNAPSHOT: list[float] = [0, 0, 0.0]
 
 
 def _request_shutdown(*_: object) -> None:
@@ -120,7 +135,13 @@ async def _run_probes(
                         "probe.severity": probe.severity,
                     },
                 ):
+                    probe_started = time.monotonic()
                     result = await execute_probe(probe, target, settings, client)
+                    record_probe(
+                        probe.suite,
+                        result.outcome,
+                        int((time.monotonic() - probe_started) * 1000),
+                    )
                     set_attributes(**{"finding.outcome": result.outcome})
                     return probe, result
             except Exception as exc:  # a probe never fails the scan
@@ -157,6 +178,12 @@ async def _complete(session: AsyncSession, scan: Scan) -> None:
     scan.locked_by = None
     await session.commit()
 
+    # Measured from submission, not from claim: the queue wait is part of what
+    # the person waited through.
+    record_scan_completed(
+        "completed", grade, int((scan.finished_at - scan.queued_at).total_seconds() * 1000)
+    )
+
     log.info(
         "scan.completed",
         scan_id=str(scan.id),
@@ -173,6 +200,10 @@ async def _fail(session: AsyncSession, scan: Scan, reason: str) -> None:
     scan.locked_at = None
     scan.locked_by = None
     await session.commit()
+
+    record_scan_completed(
+        "failed", None, int((scan.finished_at - scan.queued_at).total_seconds() * 1000)
+    )
     log.error("scan.failed", scan_id=str(scan.id), reason=reason)
 
 
@@ -244,7 +275,11 @@ async def _loop(settings: Settings, client: ModelClient) -> None:
             )
             if exhausted:
                 await session.commit()
+                record_reclaim("exhausted", len(exhausted))
                 log.warning("scan.exhausted", count=len(exhausted))
+
+            stats = await queue_stats(session)
+            _QUEUE_SNAPSHOT[:] = [stats.pending, stats.running, stats.oldest_age_seconds]
 
             scan = await claim_next_scan(
                 session,
@@ -262,6 +297,9 @@ async def _loop(settings: Settings, client: ModelClient) -> None:
 
             idle_logged = False
             await session.commit()
+
+            if scan.attempts > 1:
+                record_reclaim("lease_expired")
 
             # This is the join. The context was serialised by the API when the
             # scan was submitted, possibly minutes ago in another process;
@@ -311,6 +349,10 @@ async def main() -> None:
             signal.signal(sig, _request_shutdown)
 
     configure_telemetry(settings, service_name="promptproof-worker")
+    configure_metrics(settings, service_name="promptproof-worker")
+    set_queue_snapshot(
+        lambda: (int(_QUEUE_SNAPSHOT[0]), int(_QUEUE_SNAPSHOT[1]), _QUEUE_SNAPSHOT[2])
+    )
 
     try:
         client: GroqClient = build_client(settings)
@@ -326,6 +368,7 @@ async def main() -> None:
         await client.aclose()
         await dispose_engine()
         shutdown_telemetry()
+        shutdown_metrics()
         log.info("worker.stop")
 
 

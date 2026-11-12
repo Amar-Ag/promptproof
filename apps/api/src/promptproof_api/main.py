@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from promptproof_core.db import check_connectivity, dispose_engine, init_engine
 from promptproof_core.logging import configure_logging, get_logger
+from promptproof_core.metrics import configure_metrics, shutdown_metrics
 from promptproof_core.settings import Settings, get_settings
 from promptproof_core.telemetry import configure_telemetry, shutdown_telemetry
 
@@ -34,6 +35,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings.assert_production_safe()
 
     configure_telemetry(settings, service_name="promptproof-api")
+    configure_metrics(settings, service_name="promptproof-api")
 
     init_engine(settings)
     log.info(
@@ -47,6 +49,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         await dispose_engine()
         shutdown_telemetry()
+        shutdown_metrics()
         log.info("api.stop")
 
 

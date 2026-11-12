@@ -14,6 +14,7 @@ from dataclasses import dataclass
 
 from promptproof_core.judge import JudgeError, evaluate
 from promptproof_core.logging import get_logger
+from promptproof_core.metrics import record_judge_error, record_target_error
 from promptproof_core.models import Target
 from promptproof_core.probes import Probe
 from promptproof_core.provider import ModelClient, ProviderError
@@ -83,6 +84,7 @@ async def execute_probe(
             )
     except ProviderError as exc:
         elapsed = int((time.monotonic() - started) * 1000)
+        record_target_error(exc.reason)
         log.warning(
             "target.errored",
             probe_id=probe.id,
@@ -109,6 +111,7 @@ async def execute_probe(
                 }
             )
     except JudgeError as exc:
+        record_judge_error(exc.reason)
         log.warning("judge.errored", probe_id=probe.id, suite=probe.suite, reason=exc.reason)
         # The response is kept as evidence even though no verdict was reached:
         # a human can still read what the target said.

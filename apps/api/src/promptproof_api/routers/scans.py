@@ -11,6 +11,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Response, status
 from promptproof_core.logging import get_logger
+from promptproof_core.metrics import record_scan_submitted
 from promptproof_core.models import Finding, Scan, Target, TargetFamily
 from promptproof_core.probes import get_corpus
 from promptproof_core.suites import unknown_suites
@@ -112,6 +113,7 @@ async def submit_scan(payload: ScanCreate, session: SessionDep) -> ScanCreated:
             }
         )
 
+        record_scan_submitted(target.kind)
         log.info(
             "scan.submitted",
             scan_id=str(scan.id),
