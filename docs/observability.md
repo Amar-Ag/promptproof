@@ -94,6 +94,37 @@ default suite selection. Alerting is derived from this, not from resource usage.
 Both deliver to a human channel and to the on-call agent endpoint. Neither is defined on CPU,
 memory, or disk. An alert without a runbook is deleted rather than muted.
 
+### Where the rules live, and why
+
+The rules are code, in `packages/core/alerts.py`, and the evaluator runs **inside the API
+process**. Both of those are deliberate.
+
+**In the repository rather than a dashboard**, because the conditions are two SQL queries over
+data we already hold, and rules kept here are reviewed, versioned and — unlike a dashboard
+rule — testable. The firing state machine has unit tests and the measurements have integration
+tests.
+
+**In the API rather than the worker**, because `scan-queue-stalled` exists to notice that the
+worker has stopped picking work up. An evaluator inside the worker cannot report that: the
+condition it watches for is its own death. It would produce a system that alerts on everything
+except the failure it was built for, and it would pass every test that did not kill the worker.
+
+Each rule has a sustain window because a single bad sample is noise. Scans legitimately queue
+for a few seconds; without the window the queue rule would fire on ordinary traffic and be
+muted within a day. An alert fires on the edge into a sustained breach and does not repeat
+while it is still firing.
+
+### Delivery
+
+A firing alert is POSTed to two places: the on-call agent endpoint, signed with HMAC-SHA256
+over the exact body using `ONCALL_WEBHOOK_SECRET`, and a human channel. Both, not either — the
+agent acts, and a person needs to know an agent is acting, and to be the one who notices when
+it does not.
+
+Delivery is best-effort. A webhook being down is logged at error level but never stops scans
+running: the system being partly broken is not a reason to break the rest of it. The payload
+carries identifiers, numbers, the symptom and the runbook link. It never carries scan content.
+
 ## Where the signals go
 
 Traces are exported over OTLP to **Logfire**, at

@@ -48,6 +48,16 @@ class Settings(BaseSettings):
     otel_service_name: str = "promptproof"
     log_level: str = "INFO"
 
+    # ── Alerting ──────────────────────────────────────────────────────────────
+    # How often the rules are measured. The sustain windows do the smoothing,
+    # so this only needs to be frequent enough not to blur them.
+    alert_eval_interval_seconds: float = Field(default=30.0, gt=0)
+
+    # Where a firing alert goes. Empty means evaluate but do not deliver, which
+    # is what local development and the tests run as.
+    alert_oncall_webhook_url: str = ""
+    alert_human_webhook_url: str = ""
+
     # ── Security ──────────────────────────────────────────────────────────────
     ssrf_allow_private: bool = False
     oncall_webhook_secret: str = ""

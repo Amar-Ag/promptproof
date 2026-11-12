@@ -5,6 +5,8 @@ and runs no scan (ADR-0001), which is what keeps request latency independent of
 model latency.
 """
 
+import asyncio
+import contextlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -19,6 +21,7 @@ from promptproof_core.metrics import configure_metrics, shutdown_metrics
 from promptproof_core.settings import Settings, get_settings
 from promptproof_core.telemetry import configure_telemetry, shutdown_telemetry
 
+from .alerting import run_alert_loop
 from .routers import scans, suites, targets
 
 log = get_logger(__name__)
@@ -38,6 +41,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_metrics(settings, service_name="promptproof-api")
 
     init_engine(settings)
+
+    # Alerting lives here because the API outlives the worker, and the worker
+    # dying is precisely what the stalled-queue rule has to be able to report.
+    stop_alerts = asyncio.Event()
+    alerts = asyncio.create_task(run_alert_loop(settings, stop_alerts))
+
     log.info(
         "api.start",
         environment=settings.environment,
@@ -47,6 +56,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        stop_alerts.set()
+        alerts.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await alerts
         await dispose_engine()
         shutdown_telemetry()
         shutdown_metrics()
