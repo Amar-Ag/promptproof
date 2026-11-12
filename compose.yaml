@@ -46,6 +46,15 @@ services:
       ALERT_ONCALL_WEBHOOK_URL: ${ALERT_ONCALL_WEBHOOK_URL:-}
       ALERT_HUMAN_WEBHOOK_URL: ${ALERT_HUMAN_WEBHOOK_URL:-}
       ONCALL_WEBHOOK_SECRET: ${ONCALL_WEBHOOK_SECRET:-}
+      ONCALL_GITHUB_TOKEN: ${ONCALL_GITHUB_TOKEN:-}
+      ONCALL_MODEL: ${ONCALL_MODEL:-qwen/qwen3.8-27b}
+      # The on-call agent runs here and judges leases and attempts against these
+      # numbers, so they must be the worker's numbers. When they drifted apart in
+      # the first drill the agent reclaimed a scan the worker would never retry
+      # and reported success. See docs/runbooks/stuck-queue.md.
+      SCAN_LEASE_SECONDS: ${SCAN_LEASE_SECONDS:-300}
+      SCAN_MAX_ATTEMPTS: ${SCAN_MAX_ATTEMPTS:-3}
+      ONCALL_REPO: ${ONCALL_REPO:-Amar-Ag/promptproof}
       LOGFIRE_TOKEN: ${LOGFIRE_TOKEN:-}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
     ports:

@@ -22,7 +22,7 @@ from promptproof_core.settings import Settings, get_settings
 from promptproof_core.telemetry import configure_telemetry, shutdown_telemetry
 
 from .alerting import run_alert_loop
-from .routers import scans, suites, targets
+from .routers import oncall, scans, suites, targets
 
 log = get_logger(__name__)
 
@@ -87,6 +87,9 @@ def create_app() -> FastAPI:
     app.include_router(suites.router, prefix="/api")
     app.include_router(targets.router, prefix="/api")
     app.include_router(scans.router, prefix="/api")
+    # No prefix: machine-to-machine, and registered before the frontend
+    # catch-all so the UI mount cannot swallow it.
+    app.include_router(oncall.router)
 
     @app.get("/healthz", tags=["health"], summary="Liveness")
     async def healthz() -> dict[str, str]:

@@ -224,14 +224,23 @@ async def evaluate_all(
 # ── Delivering ───────────────────────────────────────────────────────────────
 
 
+def encode(payload: dict[str, Any]) -> bytes:
+    """The wire form of an alert, and the only one.
+
+    Signing and sending must agree byte for byte, so both go through here.
+    Letting an HTTP client serialise the payload separately is how the sender
+    ends up signing something the receiver never sees.
+    """
+    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+
+
 def sign(payload: dict[str, Any], secret: str) -> str:
     """HMAC over the exact bytes sent.
 
     The receiver is a thing that can change production state, so it has to be
     able to tell a real alert from anyone who found the URL.
     """
-    body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    return hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    return hmac.new(secret.encode(), encode(payload), hashlib.sha256).hexdigest()
 
 
 def verify(body: bytes, signature: str, secret: str) -> bool:

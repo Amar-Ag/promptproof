@@ -1,6 +1,6 @@
 # Runbook — `scan-failure-rate-high`
 
-> **Status:** commands unverified until Phase 5.
+> **Status:** exercised. See the drill log at the foot of this page.
 
 ## Symptom
 

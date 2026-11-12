@@ -1,6 +1,6 @@
 # Runbook — `scan-queue-stalled`
 
-> **Status:** commands unverified until Phase 5. Do not treat the SQL as tested yet.
+> **Status:** exercised. See the drill log at the foot of this page.
 
 ## Symptom
 
@@ -132,6 +132,7 @@ the row IDs affected, and whether queue age recovered.
 | Date | How induced | Outcome |
 |---|---|---|
 | 2026-11-12 | Worker stopped, three scans queued | **Fired and resolved correctly.** Details below. |
+| 2026-11-12 | Worker killed mid-scan; on-call responder woken by the alert | **Responder worked the runbook correctly, after finding four defects.** Details below. |
 
 ### 2026-11-12 — first drill
 
@@ -166,3 +167,85 @@ evaluator now runs in the API, which outlives the worker.
 | Delivered to the on-call endpoint, signed | yes |
 | Delivered to a human channel | yes |
 | Payload carries no scan content | yes |
+
+### 2026-11-12 — second drill, the on-call responder
+
+The first drill proved the alert fires. This one put the responder behind it: a real scan was
+queued, the worker killed mid-scan, and the lease left to expire. Nothing was simulated.
+
+**The cycle, once it worked.**
+
+```
+18:08:39  alert.delivered    target=human     value=607.8  waiting=1
+18:08:43  oncall.responded   branch='stale lease'  tools=[inspect_worker_activity,
+                             inspect_queue, reclaim_expired_leases, fail_exhausted_scans]
+18:08:43  alert.delivered    target=oncall
+```
+
+The responder inspected before it acted, marked the abandoned scan failed so the user sees an
+honest error instead of waiting forever, and **escalated** — because no worker was running and
+starting a process is outside its authority. Its own words:
+
+> No worker has claimed work in 883s. A human needs to start/restart the worker process
+> (deploy/restart is outside the authorised tool set).
+
+That is the behaviour the design is for: fix what it is allowed to fix, say plainly what it
+cannot, and leave a record either way.
+
+**Defect 1 — the signature could never verify.** The evaluator signed a canonical JSON
+rendering of the payload and then handed the payload to the HTTP client, which serialised it
+again its own way. The bytes signed were never the bytes sent, so every genuine alert would
+have been rejected as forged and the responder would never have run at all.
+
+The first drill recorded `signed=true` and read as a pass. It was only reporting that a
+signature *header was present*. Nobody had checked that it verified, and delivery was not
+covered by a single test. Both halves now go through one `encode()`, and the test takes the
+bytes that leave the client and runs the receiver's own `verify` against them.
+
+**Defect 2 — the responder reasoned with the wrong configuration.** It runs inside the API,
+and the API had never been given `SCAN_LEASE_SECONDS` or `SCAN_MAX_ATTEMPTS`. So it judged
+leases against the 300-second default while the worker expired them at 30, and it reclaimed a
+scan the worker considered out of attempts. The scan went back to `pending`, where nothing
+would ever pick it up again, and the responder reported success.
+
+A silently wrong remediation that reports success is the worst outcome available to an on-call
+system. The settings are now wired to both services and a test fails if they ever diverge.
+
+**Defect 3 — an interrupted run claimed it had changed nothing.** Groq cut a run off partway
+through, *after* it had already marked a scan failed. The fallback report said "Nothing was
+remediated." That was false, in precisely the situation where the person reading the issue most
+needs the truth. A partial run now reports which writes had already landed, separates that from
+a run that only looked, and says a retry is safe because every action is idempotent.
+
+**Defect 4 — parallel tool calls corrupted the session.** A model is free to ask for two tools
+in one turn, and a single `AsyncSession` cannot serve concurrent operations. With a model that
+parallelises, the run raised `concurrent operations are not permitted` after remediations had
+already been applied — failing *and* leaving the queue in a state nobody had signed off on.
+The first model tried never parallelised, so nothing revealed this. Tool bodies now serialise
+on a per-run lock.
+
+**On quotas.** The drills kept dying on `tokens per day` until the cause was read properly: the
+free tier allows 200,000 tokens per model per day across the whole service, and a day of
+scanning and judging had spent the judge model's allowance. The responder now sends only the
+runbook for the alert that fired rather than both, and allows one retry rather than two.
+
+This does not solve it. On a free tier there is no model this service does not already use, so
+the responder shares a daily quota with the workload it responds to — a day busy enough to
+cause an incident is a day that can starve the responder. Worth knowing before trusting it.
+
+`openai/gpt-oss-20b` was tried as a model nothing else touches, and rejected: Groq returns
+`output_parse_failed` when it has to produce a typed report after tool calls.
+
+| Signal | Confirmed |
+|---|---|
+| Alert reaches the responder with a signature that verifies | yes, after defect 1 |
+| Responder inspects before it acts | yes, both inspections ran first |
+| Remediation is correct against the worker's real configuration | yes, after defect 2 |
+| Abandoned scan surfaced to the user as failed, not left hanging | yes |
+| Refuses and escalates when the fix needs a human | yes, worker restart |
+| A partial run reports what it had already changed | yes, after defect 3 |
+| Parallel tool calls are safe | yes, after defect 4 |
+| Issue filed on every run | **not yet — needs a token with `issues: write`** |
+
+Three of the four defects were invisible to the test suite and to reading the code. They
+appeared only when the thing was run against a real worker that had really died.
