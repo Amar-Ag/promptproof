@@ -100,7 +100,11 @@ async def inspect_recent_failures(session: AsyncSession, window_seconds: int = 1
 _WORKER_ACTIVITY_SQL = """
 SELECT count(DISTINCT locked_by) FILTER (WHERE locked_at > now() - interval '5 minutes')
            AS workers_seen,
-       max(extract(epoch FROM now() - locked_at))::int AS since_last_claim_s
+       -- now() - max(locked_at), not max(now() - locked_at): the first is the
+       -- time since the most RECENT claim, the second is the age of the OLDEST
+       -- outstanding one. They differ by the whole width of the queue, and the
+       -- agent chooses between 'worker died' and 'worker absent' on this number.
+       extract(epoch FROM now() - max(locked_at))::int AS since_last_claim_s
   FROM scans
  WHERE locked_at IS NOT NULL
 """
@@ -192,38 +196,20 @@ async def fail_exhausted_scans(
     )
 
 
-# Runbook scan-failures.md, D1/D2. Only scans that failed on a transient reason
-# and still have attempts left; a permanently broken scan is not retried.
-_REQUEUE_TRANSIENT_SQL = """
-UPDATE scans
-   SET status = 'pending', locked_at = NULL, locked_by = NULL, error = NULL,
-       finished_at = NULL
- WHERE status = 'failed'
-   AND finished_at > now() - (:window * interval '1 second')
-   AND attempts < :max_attempts
-   AND (error ILIKE '%rate limit%' OR error ILIKE '%429%' OR error ILIKE '%timeout%')
-RETURNING id
-"""
-
-
-async def requeue_transient_failures(
-    session: AsyncSession, max_attempts: int, window_seconds: int = 1800
-) -> Finding:
-    """Retry scans that failed for a reason that may since have cleared."""
-    rows = (
-        await session.execute(
-            text(_REQUEUE_TRANSIENT_SQL).bindparams(
-                window=window_seconds, max_attempts=max_attempts
-            )
-        )
-    ).fetchall()
-    await session.commit()
-    ids = [str(r[0]) for r in rows]
-    log.info("oncall.requeued", count=len(ids))
-    return Finding(
-        summary=f"requeued {len(ids)} scan(s) that failed on a transient error",
-        detail={"count": len(ids), "scan_ids": ids[:20]},
-    )
+# There is deliberately no "requeue transient failures" action.
+#
+# It existed, and it could never have matched a row. `scans.error` is written in
+# exactly three places and only ever holds one of three literals: "Target no
+# longer exists", "The selected suites contain no probes", and "Scan abandoned
+# after repeated worker failures". A provider rate limit or timeout is a
+# *probe-level* result -- it lands on `Finding.error_reason` and the scan still
+# completes, which is deliberate, because one bad probe must not fail a scan.
+#
+# So nothing transient ever reaches a scan row, and a tool filtering scan rows
+# for '%rate limit%' is a capability that reports "requeued 0" forever while
+# reading as though the system can retry. Its tests passed only because they
+# seeded an error string no code path can write. Removed rather than left as
+# theatre; see #45 for giving it something real to match.
 
 
 # What the agent may do, by name. Anything absent from this mapping does not
@@ -244,7 +230,6 @@ WRITE_ACTIONS = frozenset(
     {
         "reclaim_expired_leases",
         "fail_exhausted_scans",
-        "requeue_transient_failures",
     }
 )
 

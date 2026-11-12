@@ -246,6 +246,64 @@ cause an incident is a day that can starve the responder. Worth knowing before t
 | A partial run reports what it had already changed | yes, after defect 3 |
 | Parallel tool calls are safe | yes, after defect 4 |
 | Issue filed on every run | **not yet — needs a token with `issues: write`** |
+| Survives a caller that gives up mid-run | yes, added in review |
+| Replayed alerts refused | yes, added in review |
 
 Three of the four defects were invisible to the test suite and to reading the code. They
 appeared only when the thing was run against a real worker that had really died.
+
+### 2026-11-12 — what review found afterwards
+
+The drill above was written up as a success. Review of the same change found four more
+defects, two of them in the parts the write-up was proudest of.
+
+**The diagnostic the agent branches on was reporting the wrong number.**
+`inspect_worker_activity` computed `max(now() - locked_at)` — the age of the *oldest*
+outstanding claim — and labelled it "time since the last claim", which is
+`now() - max(locked_at)`. With one stale row beside one healthy claim it reports that no
+worker has been seen for two and a half hours while a worker is in fact working. The agent
+chooses between "a worker died, reclaim" and "no worker is running, escalate" on exactly this
+number, so the result is a human woken for a healthy system.
+
+The drill quote above — "No worker has claimed work in 883s" — came from the broken
+expression. It was right only because there was a single row. The test that should have caught
+it asserted `workers_seen` and never looked at the number at all.
+
+**One of the three authorised remediations could never have matched a row.**
+`requeue_transient_failures` filtered `scans.error` for `%rate limit%`, `%429%` and
+`%timeout%`. `scans.error` is written in three places and only ever holds one of three
+literals, none of them transient — a provider rate limit is a *probe-level* result that leaves
+the scan `completed`, deliberately, because one bad probe must not fail a scan.
+
+So during a real rate-limit episode the agent would have called it, been told "requeued 0", and
+filed an issue reporting nothing transient to retry while every user-visible failure was
+transient. Its three tests passed only because they seeded an error string no code path can
+write. The tool is removed rather than left as theatre; [#45](https://github.com/Amar-Ag/promptproof/issues/45)
+covers giving it something real to match.
+
+**A caller that gave up took the report with it.** The run had no deadline of its own while the
+deliverer gave up at 90 seconds and disconnected, cancelling the handler. `CancelledError` is a
+`BaseException`, so it passed through every handler on the path: no report, no issue — after
+remediations had already committed. The alert loop would log a delivery failure, so the written
+history would say the responder was unreachable at the moment it was changing production rows.
+The run now owns its session, runs shielded, and carries its report out through the
+cancellation.
+
+**A valid signature was valid forever.** Nothing bound a signed body to a moment, so a captured
+alert could be replayed indefinitely — each replay a full agent run spending the daily
+per-model quota that [ADR-0006](../adr/0006-bounded-oncall-agent.md) names as this responder's
+scarce resource. Enough of them overnight and the responder is starved when a real alert fires:
+the failure that ADR says to watch for, reachable on purpose. `fired_at` is already inside the
+signed bytes, so alerts older than ten minutes are now refused, and runs are single-flight.
+
+**Known limitation, not a defect.** `inspect_worker_activity` cannot tell an *idle* worker from
+an absent one: both have claimed nothing recently. It does not mislead in practice, because the
+alert only fires when scans are waiting, and a worker not claiming while work waits is the
+thing worth reporting. But a synthetic alert sent at an empty queue will produce a confident
+"no worker" from a perfectly healthy system, as one did while testing the fixes above.
+
+**The pattern, again.** Two of these four were in code the first write-up presented as
+verified, and two of the tests backing that write-up asserted less than their names promised —
+one built its own lock rather than checking the agent took one, another grepped the source for
+a string. The endpoint that authenticates the whole path had no test at all. Running the thing
+found four defects; having someone else read it found four more.

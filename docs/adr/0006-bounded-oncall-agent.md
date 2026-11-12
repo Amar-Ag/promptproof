@@ -89,6 +89,14 @@ absent — because starting a process is outside its authority. It escalates, wh
 but is not resolution. Adding a capability means writing a tool and a test, deliberately: this
 is friction by design, and it will feel like friction.
 
+**Be honest about what this is not.** The agent holds no *credential* restriction. It runs
+inside the API process and shares the database role Alembic uses for migrations, so at the
+connection level it could do anything that role can. The control is the toolset: there is no
+tool that expresses a migration, a delete or a deploy, and no general query tool through which
+one could be improvised. That is a real boundary, but an application-level one. A restricted
+database role would make the guarantee structural rather than architectural, and is the obvious
+next step if this agent is ever given more reach.
+
 **Watch for.** The agent runs synchronously inside the alert webhook, so a run holds the
 delivery open for as long as it takes (see `ONCALL_TIMEOUT_SECONDS`). The human channel is
 therefore notified *first*. If agent runs grow much slower, this should move to a background

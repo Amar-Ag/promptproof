@@ -11,7 +11,6 @@ prompt. A prompt saying "do not delete anything" is a request; a toolset with
 no delete in it is a boundary. So the authorised set is asserted directly.
 """
 
-import asyncio
 from datetime import UTC, datetime, timedelta
 
 from promptproof_core.models import Scan, Target, TargetFamily
@@ -22,7 +21,6 @@ from promptproof_core.oncall.remediations import (
     inspect_recent_failures,
     inspect_worker_activity,
     reclaim_expired_leases,
-    requeue_transient_failures,
 )
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -100,8 +98,22 @@ class TestAuthority:
             "inspect_worker_activity",
             "reclaim_expired_leases",
             "fail_exhausted_scans",
-            "requeue_transient_failures",
         }
+
+    def test_nothing_claims_to_retry_a_transient_failure(self) -> None:
+        """There was such an action, and it could never have matched a row.
+
+        `scans.error` only ever holds one of three literals, none of them
+        transient: a rate limit or timeout is a probe-level result that leaves
+        the scan completed. The tool filtered scan rows for '%rate limit%' and
+        would have reported "requeued 0" forever while reading, to anyone
+        looking at the authorised set, as though retrying were possible. Its
+        tests passed only by seeding an error string no code path can write.
+
+        Removed rather than left as theatre; see #45. Asserted so it cannot
+        come back without the data to make it real.
+        """
+        assert not any("requeue" in action for action in AUTHORISED_ACTIONS)
 
 
 class TestInspection:
@@ -130,6 +142,35 @@ class TestInspection:
         await add_scan(session, target, status="running", attempts=1, locked_ago=10)
         finding = await inspect_worker_activity(session)
         assert finding.detail["workers_seen"] == 1
+
+    async def test_it_reports_the_most_recent_claim_not_the_oldest(
+        self, session: AsyncSession
+    ) -> None:
+        """`max(now - locked_at)` is the age of the OLDEST outstanding claim;
+        the time since the most recent one is `now - max(locked_at)`. They
+        differ by the whole width of the queue.
+
+        It matters because the agent chooses between "a worker died mid-scan,
+        reclaim" and "no worker is running, escalate" on this number. With one
+        stale row beside one healthy claim, the wrong aggregate says no worker
+        has been seen for two and a half hours while a worker is in fact
+        working — so the responder escalates a healthy system and a human is
+        woken for nothing.
+
+        The earlier version asserted only `workers_seen`, so it passed against
+        the wrong expression and its name promised more than it checked.
+        """
+        target = await make_target(session)
+        await add_scan(session, target, status="running", attempts=1, locked_ago=9_000)
+        await add_scan(session, target, status="running", attempts=1, locked_ago=10)
+
+        finding = await inspect_worker_activity(session)
+        since = finding.detail["seconds_since_last_claim"]
+        assert since is not None
+        assert since < 60, (
+            f"reported {since}s since the last claim, but a worker claimed work "
+            "10 seconds ago - this is the oldest claim, not the most recent"
+        )
 
     async def test_failures_are_grouped_by_reason(self, session: AsyncSession) -> None:
         target = await make_target(session)
@@ -214,111 +255,3 @@ class TestFailExhausted:
         second = await fail_exhausted_scans(session, LEASE, MAX_ATTEMPTS)
         assert first.detail["count"] == 1
         assert second.detail["count"] == 0
-
-
-class TestRequeue:
-    async def test_it_retries_transient_failures(self, session: AsyncSession) -> None:
-        target = await make_target(session)
-        scan = await add_scan(
-            session,
-            target,
-            status="failed",
-            attempts=1,
-            finished_ago=60,
-            error="HTTP 429 rate limited",
-        )
-
-        finding = await requeue_transient_failures(session, MAX_ATTEMPTS)
-        assert finding.detail["count"] == 1
-
-        refreshed = await session.get(Scan, scan.id, populate_existing=True)
-        assert refreshed is not None
-        assert refreshed.status == "pending"
-        assert refreshed.error is None
-
-    async def test_it_leaves_permanent_failures_alone(self, session: AsyncSession) -> None:
-        """Retrying something that will fail identically wastes the user's time."""
-        target = await make_target(session)
-        await add_scan(
-            session,
-            target,
-            status="failed",
-            attempts=1,
-            finished_ago=60,
-            error="Target no longer exists",
-        )
-        finding = await requeue_transient_failures(session, MAX_ATTEMPTS)
-        assert finding.detail["count"] == 0
-
-    async def test_it_respects_the_attempt_limit(self, session: AsyncSession) -> None:
-        target = await make_target(session)
-        await add_scan(
-            session,
-            target,
-            status="failed",
-            attempts=MAX_ATTEMPTS,
-            finished_ago=60,
-            error="HTTP 429 rate limited",
-        )
-        finding = await requeue_transient_failures(session, MAX_ATTEMPTS)
-        assert finding.detail["count"] == 0
-
-    async def test_running_it_twice_changes_nothing_the_second_time(
-        self, session: AsyncSession
-    ) -> None:
-        target = await make_target(session)
-        await add_scan(
-            session,
-            target,
-            status="failed",
-            attempts=1,
-            finished_ago=60,
-            error="HTTP 429 rate limited",
-        )
-        first = await requeue_transient_failures(session, MAX_ATTEMPTS)
-        second = await requeue_transient_failures(session, MAX_ATTEMPTS)
-        assert first.detail["count"] == 1
-        assert second.detail["count"] == 0
-
-
-class TestConcurrentTools:
-    """A model may ask for two tools in one turn, and they then run at once.
-
-    One `AsyncSession` cannot serve concurrent operations. The first drill with
-    a model that parallelises its tool calls raised
-    `InvalidRequestError: concurrent operations are not permitted` mid-run,
-    after remediations had already been applied — so the run both failed and
-    left the queue in a state nobody had signed off on.
-
-    The deps carry a lock for this. The test drives the remediations the way a
-    parallelising model does, rather than trusting that it holds.
-    """
-
-    async def test_two_remediations_at_once_do_not_corrupt_the_session(
-        self, session: AsyncSession
-    ) -> None:
-        target = await make_target(session)
-        await add_scan(session, target, status="running", attempts=1, locked_ago=LEASE + 60)
-        await add_scan(
-            session,
-            target,
-            status="failed",
-            attempts=1,
-            finished_ago=60,
-            error="HTTP 429 rate limited",
-        )
-
-        lock = asyncio.Lock()
-
-        async def guarded(coro_factory):
-            async with lock:
-                return await coro_factory()
-
-        results = await asyncio.gather(
-            guarded(lambda: inspect_queue(session, LEASE)),
-            guarded(lambda: reclaim_expired_leases(session, LEASE, MAX_ATTEMPTS)),
-            guarded(lambda: requeue_transient_failures(session, MAX_ATTEMPTS)),
-        )
-
-        assert results[1].detail["count"] == 1
-        assert results[2].detail["count"] == 1

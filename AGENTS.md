@@ -37,11 +37,11 @@ promptproof/
 │   └── web/          React + TypeScript frontend (Vite)
 ├── packages/
 │   └── core/         Shared Python domain code: models, probe loading, scoring, telemetry
+│       └── ...oncall/  The on-call responder: its tools, its report, its issues
 ├── probes/           The attack corpus, as versioned YAML. Reviewed like code.
 ├── docs/             Specs, architecture, agent team, process, runbooks, ADRs
 ├── ops/
-│   ├── oncall/       The on-call responder agent
-│   └── fly/          Deployment configuration
+│   └── docker/       Container entrypoints
 ├── tests/
 │   ├── unit/         No I/O, no containers, milliseconds
 │   ├── integration/  Real Postgres, stubbed model provider

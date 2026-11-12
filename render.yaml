@@ -54,6 +54,25 @@ services:
         value: "600"
       - key: SSRF_ALLOW_PRIVATE
         value: "false"
+      # The on-call responder. The API and the worker share this container
+      # (ADR-0005), so the alert evaluator reaches the responder over loopback
+      # and the signature still has to verify -- the endpoint refuses an
+      # unsigned call whatever the source.
+      - key: ALERT_ONCALL_WEBHOOK_URL
+        value: http://localhost:10000/internal/oncall/alert
+      # Generated per service. Without it the endpoint fails closed with a 503
+      # rather than running unauthenticated.
+      - key: ONCALL_WEBHOOK_SECRET
+        generateValue: true
+      - key: ONCALL_MODEL
+        value: qwen/qwen3.8-27b
+      - key: ONCALL_REPO
+        value: Amar-Ag/promptproof
+      # Needs `issues: write` and nothing else. Unset means the responder still
+      # diagnoses and remediates, but logs `oncall.issue_skipped` instead of
+      # leaving a written trail.
+      - key: ONCALL_GITHUB_TOKEN
+        sync: false
 
   # ── Production ─────────────────────────────────────────────────────────────
   - type: web
@@ -92,3 +111,22 @@ services:
       # mistake here stops the process rather than quietly widening egress.
       - key: SSRF_ALLOW_PRIVATE
         value: "false"
+      # The on-call responder. The API and the worker share this container
+      # (ADR-0005), so the alert evaluator reaches the responder over loopback
+      # and the signature still has to verify -- the endpoint refuses an
+      # unsigned call whatever the source.
+      - key: ALERT_ONCALL_WEBHOOK_URL
+        value: http://localhost:10000/internal/oncall/alert
+      # Generated per service. Without it the endpoint fails closed with a 503
+      # rather than running unauthenticated.
+      - key: ONCALL_WEBHOOK_SECRET
+        generateValue: true
+      - key: ONCALL_MODEL
+        value: qwen/qwen3.8-27b
+      - key: ONCALL_REPO
+        value: Amar-Ag/promptproof
+      # Needs `issues: write` and nothing else. Unset means the responder still
+      # diagnoses and remediates, but logs `oncall.issue_skipped` instead of
+      # leaving a written trail.
+      - key: ONCALL_GITHUB_TOKEN
+        sync: false

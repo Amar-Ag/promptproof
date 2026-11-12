@@ -14,21 +14,12 @@ And the body must carry numbers and names, never scan content: a prompt-injectio
 probe or a model's response to one has no business in a public issue tracker.
 """
 
-import asyncio
 import json
-import re
-from pathlib import Path
 
 import httpx
 import pytest
-from promptproof_core.oncall import agent as agent_module
 from promptproof_core.oncall import issues as issues_module
-from promptproof_core.oncall.agent import (
-    OnCallDeps,
-    OnCallReport,
-    _interrupted,
-    prompt_for,
-)
+from promptproof_core.oncall.agent import OnCallReport, _interrupted, prompt_for
 from promptproof_core.oncall.issues import file_issue, render
 
 ALERT = {
@@ -166,41 +157,6 @@ class TestPromptScoping:
         for name in ("scan-queue-stalled", "scan-failure-rate-high", None):
             prompt = prompt_for(name)
             assert "Inspect before you act" in prompt
-
-
-class TestToolsTakeTheLock:
-    """Every tool body must serialise on the shared session.
-
-    One `AsyncSession` cannot serve concurrent operations, and a model is free
-    to request two tools in a single turn. A live run with a parallelising model
-    raised `concurrent operations are not permitted` partway through, after
-    remediations had already been applied.
-
-    Asserted against the source because the failure only appears with a model
-    that happens to parallelise, which makes it exactly the kind of bug that
-    passes every test until it matters.
-    """
-
-    def test_every_registered_tool_acquires_the_session_lock(self) -> None:
-        source = Path(agent_module.__file__).read_text(encoding="utf-8")
-        bodies = re.split(r"^    @agent\.tool$", source, flags=re.M)[1:]
-        assert len(bodies) == 6, f"expected 6 registered tools, found {len(bodies)}"
-        for body in bodies:
-            name = re.search(r"async def (\w+)", body)
-            assert name, "could not read a tool name"
-            assert "async with ctx.deps.lock:" in body, (
-                f"{name.group(1)} touches the session without taking the lock"
-            )
-
-    def test_the_deps_carry_a_lock(self) -> None:
-        deps = OnCallDeps(session=None, settings=None, actions=[])  # type: ignore[arg-type]
-        assert isinstance(deps.lock, asyncio.Lock)
-
-    def test_each_run_gets_its_own_lock(self) -> None:
-        """A lock shared between runs would serialise unrelated incidents."""
-        a = OnCallDeps(session=None, settings=None, actions=[])  # type: ignore[arg-type]
-        b = OnCallDeps(session=None, settings=None, actions=[])  # type: ignore[arg-type]
-        assert a.lock is not b.lock
 
 
 class TestFiling:

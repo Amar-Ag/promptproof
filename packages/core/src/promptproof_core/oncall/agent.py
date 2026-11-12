@@ -30,6 +30,21 @@ from . import remediations
 log = get_logger(__name__)
 
 
+class OnCallRunCancelled(Exception):
+    """A run cancelled partway through, carrying what it had already done.
+
+    Cancellation must not simply propagate: by the time it arrives the agent
+    may have committed changes to user-visible rows, and those changes need a
+    report and an issue like any other. The caller unwraps this, files the
+    paperwork, and then lets the cancellation stand.
+    """
+
+    def __init__(self, report: "OnCallReport", tools_used: list[str]) -> None:
+        super().__init__("on-call run cancelled")
+        self.report = report
+        self.tools_used = tools_used
+
+
 @dataclass
 class OnCallDeps:
     session: AsyncSession
@@ -113,10 +128,11 @@ Runbook -- **scan-queue-stalled**: scans are queued and not progressing.
 Runbook -- **scan-failure-rate-high**: scans are finishing as failures.
 
   1. Look at the recent failures grouped by reason.
-  2. If they are transient (rate limits, timeouts), requeue those with attempts
-     remaining.
-  3. If they are concentrated on one target, or look like a bad release, you
-     cannot fix it. Escalate.
+  2. Report what you find. You have no action for this alert: a scan only fails
+     when it is abandoned or its target is gone, and neither is something you
+     can fix. Provider rate limits and timeouts do not fail scans at all.
+  3. Escalate, naming the dominant reason and whether it is concentrated on one
+     target.
 """,
 }
 
@@ -145,70 +161,70 @@ def build_agent(
     )
 
     def record(ctx: RunContext[OnCallDeps], name: str) -> None:
+        """Called after the tool returns, never before.
+
+        Recording on entry means a write that raised before its COMMIT is
+        reported to the next reader as applied. For an interrupted run that
+        inverts the very thing the report exists to get right.
+        """
         ctx.deps.actions.append(name)
 
     @agent.tool
     async def inspect_queue(ctx: RunContext[OnCallDeps]) -> dict[str, Any]:
         """Queue depth, the age of the oldest pending scan, and expired leases."""
-        record(ctx, "inspect_queue")
         async with ctx.deps.lock:
             finding = await remediations.inspect_queue(
                 ctx.deps.session, ctx.deps.settings.scan_lease_seconds
             )
-            return {"summary": finding.summary, **finding.detail}
+            result = {"summary": finding.summary, **finding.detail}
+        record(ctx, "inspect_queue")
+        return result
 
     @agent.tool
     async def inspect_worker_activity(ctx: RunContext[OnCallDeps]) -> dict[str, Any]:
         """Whether any worker has claimed work recently. Tells an absent worker
         from a present one that is not progressing."""
-        record(ctx, "inspect_worker_activity")
         async with ctx.deps.lock:
             finding = await remediations.inspect_worker_activity(ctx.deps.session)
-            return {"summary": finding.summary, **finding.detail}
+            result = {"summary": finding.summary, **finding.detail}
+        record(ctx, "inspect_worker_activity")
+        return result
 
     @agent.tool
     async def inspect_recent_failures(ctx: RunContext[OnCallDeps]) -> dict[str, Any]:
         """Recently failed scans grouped by reason."""
-        record(ctx, "inspect_recent_failures")
         async with ctx.deps.lock:
             finding = await remediations.inspect_recent_failures(ctx.deps.session)
-            return {"summary": finding.summary, **finding.detail}
+            result = {"summary": finding.summary, **finding.detail}
+        record(ctx, "inspect_recent_failures")
+        return result
 
     @agent.tool
     async def reclaim_expired_leases(ctx: RunContext[OnCallDeps]) -> dict[str, Any]:
         """Return scans whose worker died back to the queue. Idempotent."""
-        record(ctx, "reclaim_expired_leases")
         async with ctx.deps.lock:
             finding = await remediations.reclaim_expired_leases(
                 ctx.deps.session,
                 ctx.deps.settings.scan_lease_seconds,
                 ctx.deps.settings.scan_max_attempts,
             )
-            return {"summary": finding.summary, **finding.detail}
+            result = {"summary": finding.summary, **finding.detail}
+        record(ctx, "reclaim_expired_leases")
+        return result
 
     @agent.tool
     async def fail_exhausted_scans(ctx: RunContext[OnCallDeps]) -> dict[str, Any]:
         """Mark scans that are out of attempts as failed, so the user sees an
         honest error rather than waiting forever. Idempotent."""
-        record(ctx, "fail_exhausted_scans")
         async with ctx.deps.lock:
             finding = await remediations.fail_exhausted_scans(
                 ctx.deps.session,
                 ctx.deps.settings.scan_lease_seconds,
                 ctx.deps.settings.scan_max_attempts,
             )
-            return {"summary": finding.summary, **finding.detail}
-
-    @agent.tool
-    async def requeue_transient_failures(ctx: RunContext[OnCallDeps]) -> dict[str, Any]:
-        """Retry scans that failed on a rate limit or timeout and still have
-        attempts remaining. Idempotent."""
-        record(ctx, "requeue_transient_failures")
-        async with ctx.deps.lock:
-            finding = await remediations.requeue_transient_failures(
-                ctx.deps.session, ctx.deps.settings.scan_max_attempts
-            )
-            return {"summary": finding.summary, **finding.detail}
+            result = {"summary": finding.summary, **finding.detail}
+        record(ctx, "fail_exhausted_scans")
+        return result
 
     return agent
 
@@ -231,7 +247,11 @@ async def respond(
 
     try:
         result = await agent.run(prompt, deps=deps)
-    except Exception as exc:
+    except BaseException as exc:
+        # BaseException, not Exception: a cancellation is the case where the
+        # report matters most, because the writes that already committed are
+        # the ones nobody would otherwise hear about. The report is built, then
+        # a cancellation is re-raised so the event loop still sees it.
         # A run can be cut off partway through — a provider rate limit is the
         # common one on a free tier. The tools that already ran have already
         # changed rows, and saying "nothing was remediated" would be a lie in
@@ -242,7 +262,10 @@ async def respond(
             reason=type(exc).__name__,
             tools_used=deps.actions,
         )
-        return _interrupted(exc, deps.actions), deps.actions
+        report = _interrupted(exc, deps.actions)
+        if isinstance(exc, asyncio.CancelledError):
+            raise OnCallRunCancelled(report, list(deps.actions)) from exc
+        return report, deps.actions
 
     log.info(
         "oncall.responded",
@@ -255,7 +278,7 @@ async def respond(
     return result.output, deps.actions
 
 
-def _interrupted(exc: Exception, tools_used: list[str]) -> OnCallReport:
+def _interrupted(exc: BaseException, tools_used: list[str]) -> OnCallReport:
     """The report for a run that did not finish.
 
     It must distinguish a run that only looked from a run that had already

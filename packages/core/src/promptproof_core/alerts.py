@@ -244,5 +244,11 @@ def sign(payload: dict[str, Any], secret: str) -> str:
 
 
 def verify(body: bytes, signature: str, secret: str) -> bool:
+    # A signature is hex, so anything else is already a failure. Checked before
+    # compare_digest because that raises TypeError on a non-ASCII str, and an
+    # unhandled 500 would lose the rejection that should have been logged --
+    # a junk header would read as a server fault rather than a refused caller.
+    if not signature.isascii():
+        return False
     expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected, signature)
