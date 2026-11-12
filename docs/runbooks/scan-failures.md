@@ -105,4 +105,49 @@ rate recovered.
 
 | Date | How induced | Outcome |
 |---|---|---|
-| _Phase 5_ | Point a stub provider at a 429-always response | _to be recorded_ |
+| 2026-11-12 | Worker killed mid-scan until scans exhausted their attempts | **Fired correctly, after finding two defects.** Details below. |
+
+### 2026-11-12 — first drill
+
+**How the failures were induced, and what that revealed.** Pointing the provider at errors
+does not work: a failing probe produces an `errored` finding and the scan still *completes*.
+That is deliberate — one bad probe must not fail a scan — but it means the only route to a
+genuinely failed scan is attempt exhaustion. The worker was therefore killed mid-scan
+repeatedly, with `SCAN_MAX_ATTEMPTS=1`, so each abandoned scan exhausted on the next startup.
+
+Worth recording for whoever runs this next: **a scan failing is rare by design**, so a
+sustained failure rate is hard to produce on a healthy system. That is a property, not an
+obstacle.
+
+**Defect 1 — the rule could never fire.** A real 71% failure rate produced nothing. The rule
+measured the rate over a ten-minute window *and* required the breach to hold for ten minutes.
+Those are not the same thing: a ten-minute average is already smoothed, so demanding it also
+persist for ten minutes means twenty minutes of sustained failure — and the failing scans age
+out of the measurement window while the sustain window is still counting. The condition
+expires before it can be satisfied.
+
+**Defect 2 — the fix looked like it worked.** After separating the two on the rule, the call
+site still passed the sustain. The alert fired, which reads as success, but the payload said
+`window_seconds: 60`: one failed scan in an otherwise quiet minute was being reported as a
+100% failure rate. That is worse than unfireable, because an alert that twitchy gets muted.
+
+**After both fixes:**
+
+```
+/oncall  signed=true   scan-failure-rate-high  value=0.8  failed=4/5  window=600s
+/human   signed=false  scan-failure-rate-high  value=0.8  failed=4/5  window=600s
+```
+
+| Signal | Confirmed |
+|---|---|
+| Fires on a genuine sustained breach | yes, 80% over ten minutes |
+| Measures over the declared ten-minute window | yes, asserted in the payload |
+| Does not fire on a healthy 10% rate | yes, covered by a test |
+| Delivered to the on-call endpoint, signed | yes |
+| Delivered to a human channel | yes |
+| Payload carries no scan content | yes |
+
+Neither defect would have been found by the unit tests. They fed the evaluator synthetic
+values at times of their choosing, so nothing ever aged out underneath it and nothing ever
+checked which window was actually used. Both are now pinned by integration tests that were
+verified to fail against the old behaviour.
