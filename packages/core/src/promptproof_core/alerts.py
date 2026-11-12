@@ -212,7 +212,9 @@ async def evaluate_all(
     if alert := evaluator.observe(QUEUE_STALLED, age, moment, age_context):
         fired.append(alert)
 
-    rate, rate_context = await measure_failure_rate(session, FAILURE_RATE_HIGH.sustain_seconds)
+    rate, rate_context = await measure_failure_rate(
+        session, FAILURE_RATE_HIGH.window_seconds or 600
+    )
     if alert := evaluator.observe(FAILURE_RATE_HIGH, rate, moment, rate_context):
         fired.append(alert)
 
