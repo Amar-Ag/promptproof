@@ -190,3 +190,52 @@ class TestEvaluateAll:
         )
         assert [a.rule.name for a in fired] == ["scan-failure-rate-high"]
         assert fired[0].value == 0.4
+
+
+class TestWindowIsNotSustain:
+    """The two were conflated once and the rule became unfireable.
+
+    They were then *separated* on the Rule while the call site kept passing the
+    sustain, which is worse: the alert fired, so it looked fixed, but it was
+    measuring a sixty-second window — twitchy enough that one failed scan in a
+    quiet minute reads as a 100% failure rate.
+
+    Both bugs are invisible unless something asserts on the window that was
+    actually used, so this does.
+    """
+
+    async def test_evaluate_all_measures_over_the_declared_window(
+        self, session: AsyncSession
+    ) -> None:
+        target = await make_target(session)
+        # Failed recently; completed slightly longer ago but still inside the
+        # ten-minute window. A sixty-second window would see only the failure
+        # and report 100%.
+        await add_scan(session, target, status="failed", finished_ago=10)
+        for _ in range(9):
+            await add_scan(session, target, status="completed", finished_ago=300)
+
+        evaluator = Evaluator()
+        now = datetime.now(UTC)
+        await evaluate_all(session, evaluator, now)
+        fired = await evaluate_all(
+            session, evaluator, now + timedelta(seconds=FAILURE_RATE_HIGH.sustain_seconds + 1)
+        )
+
+        # 1 of 10 over ten minutes is 10%, under the threshold: nothing fires.
+        assert fired == [], "fired on a healthy 10% rate — the measurement window is too short"
+
+    async def test_the_window_is_reported_in_the_payload(self, session: AsyncSession) -> None:
+        target = await make_target(session)
+        for _ in range(3):
+            await add_scan(session, target, status="failed", finished_ago=10)
+
+        evaluator = Evaluator()
+        now = datetime.now(UTC)
+        await evaluate_all(session, evaluator, now)
+        fired = await evaluate_all(
+            session, evaluator, now + timedelta(seconds=FAILURE_RATE_HIGH.sustain_seconds + 1)
+        )
+
+        assert fired
+        assert fired[0].context["window_seconds"] == FAILURE_RATE_HIGH.window_seconds == 600

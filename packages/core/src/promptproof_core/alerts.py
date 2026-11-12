@@ -46,6 +46,16 @@ class Rule:
     # noise; a sustained one is a problem. Scans legitimately queue for a few
     # seconds, so without this the queue rule would fire constantly.
     sustain_seconds: int
+    # For a rule whose value is already an average over a period, how long that
+    # period is.
+    #
+    # These two must not be conflated. A rate measured over ten minutes is
+    # already smoothed, so requiring it to *also* hold for ten minutes means
+    # twenty minutes of sustained failure — and the evidence ages out of the
+    # measurement window while the sustain window is still counting, so the
+    # alert can never fire at all. Found by running the drill: a real 71%
+    # failure rate would have gone unreported.
+    window_seconds: int | None = None
 
     @property
     def runbook_url(self) -> str:
@@ -68,7 +78,9 @@ FAILURE_RATE_HIGH = Rule(
     ),
     runbook="scan-failures.md",
     threshold=0.20,
-    sustain_seconds=600,
+    # Short, because window_seconds below does the smoothing.
+    sustain_seconds=60,
+    window_seconds=600,
 )
 
 RULES: tuple[Rule, ...] = (QUEUE_STALLED, FAILURE_RATE_HIGH)
@@ -200,7 +212,9 @@ async def evaluate_all(
     if alert := evaluator.observe(QUEUE_STALLED, age, moment, age_context):
         fired.append(alert)
 
-    rate, rate_context = await measure_failure_rate(session, FAILURE_RATE_HIGH.sustain_seconds)
+    rate, rate_context = await measure_failure_rate(
+        session, FAILURE_RATE_HIGH.window_seconds or 600
+    )
     if alert := evaluator.observe(FAILURE_RATE_HIGH, rate, moment, rate_context):
         fired.append(alert)
 
