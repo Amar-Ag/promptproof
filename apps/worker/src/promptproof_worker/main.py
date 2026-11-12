@@ -18,8 +18,14 @@ import signal
 import sys
 import time
 from datetime import UTC, datetime
+from typing import Any
 
-from promptproof_core.db import dispose_engine, get_sessionmaker, init_engine
+from promptproof_core.db import (
+    dispose_engine,
+    get_sessionmaker,
+    init_engine,
+    session_scope,
+)
 from promptproof_core.grading import grade_findings
 from promptproof_core.logging import bind_scan, clear_context, configure_logging, get_logger
 from promptproof_core.metrics import (
@@ -38,7 +44,12 @@ from promptproof_core.provider import (
     ProviderQuotaExhausted,
     build_client,
 )
-from promptproof_core.queue import claim_next_scan, fail_exhausted_scans, queue_stats
+from promptproof_core.queue import (
+    claim_next_scan,
+    fail_exhausted_scans,
+    queue_stats,
+    renew_lease,
+)
 from promptproof_core.settings import Settings, get_settings
 from promptproof_core.telemetry import (
     configure_telemetry,
@@ -276,6 +287,49 @@ async def _fail(session: AsyncSession, scan: Scan, reason: str) -> None:
     log.error("scan.failed", scan_id=str(scan.id), reason=reason)
 
 
+async def _hold_lease(scan_id: Any, settings: Settings, stop: asyncio.Event) -> None:
+    """Keep this worker's claim alive while the scan is still running.
+
+    `locked_at` is written once, at claim time. A scan that outlives its lease
+    is indistinguishable from one whose worker died, so another worker claims
+    it and runs it again -- duplicate findings, and duplicate spend against the
+    provider allowance that pacing exists to protect.
+
+    That stopped being theoretical when scans began waiting out rate-limit
+    windows deliberately: a full-corpus scan now takes minutes, and a single
+    paced wait can be a minute of it. The first measured run used 234 seconds
+    of a 300-second lease, with a cheaper judge than production uses.
+
+    Renewed at a third of the lease, so two consecutive failures still leave a
+    full period of slack. Runs on its own session: the scan's session is busy
+    committing findings, and a heartbeat that queues behind the work it is
+    meant to protect protects nothing.
+    """
+    interval = max(settings.scan_lease_seconds / 3.0, 5.0)
+    while not stop.is_set():
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval)
+            return  # stopped: the scan finished
+        except TimeoutError:
+            pass
+
+        try:
+            async with session_scope() as session:
+                held = await renew_lease(session, scan_id=scan_id, worker_id=settings.worker_id)
+        except Exception as exc:
+            # A failed renewal is not fatal on its own: there is slack, and the
+            # next one may succeed. Logged because a run of them is not.
+            log.warning("lease.renew_failed", reason=type(exc).__name__)
+            continue
+
+        if not held:
+            # Someone else holds this scan now, or it has already been resolved.
+            # Carrying on would duplicate work; the scan itself is left alone
+            # rather than torn down, since whoever holds it now is running it.
+            log.warning("lease.lost", scan_id=str(scan_id))
+            return
+
+
 async def _process(
     session: AsyncSession,
     scan: Scan,
@@ -294,7 +348,13 @@ async def _process(
                 "scan.concurrency": settings.scan_concurrency,
             },
         ):
-            await _execute(session, scan, settings, client)
+            stop = asyncio.Event()
+            keepalive = asyncio.create_task(_hold_lease(scan.id, settings, stop))
+            try:
+                await _execute(session, scan, settings, client)
+            finally:
+                stop.set()
+                await keepalive
     finally:
         clear_context()
 

@@ -7,6 +7,7 @@ worker dies.
 
 import uuid
 from dataclasses import dataclass
+from typing import Any
 
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -142,3 +143,36 @@ async def queue_stats(session: AsyncSession) -> QueueStats:
         running=int(row["running"]),
         oldest_age_seconds=float(row["oldest_age_seconds"]),
     )
+
+
+# Renewing the lease of a scan that is still being worked on.
+#
+# `locked_at` is set once at claim time, so a scan that takes longer than the
+# lease is treated as abandoned and claimed by someone else while it is still
+# running -- duplicate execution, and duplicate spend against the very provider
+# allowance that pacing exists to protect. That became reachable once scans
+# began waiting out rate-limit windows on purpose: a full-corpus scan now takes
+# minutes rather than seconds.
+#
+# Guarded on `locked_by` as well as `status`, so a worker whose lease has
+# already been taken from it cannot steal the scan back from whoever holds it
+# now, and a scan that has finished or failed cannot be dragged back to running.
+_RENEW_SQL = """
+UPDATE scans
+   SET locked_at = now()
+ WHERE id = :scan_id
+   AND status = 'running'
+   AND locked_by = :worker_id
+RETURNING id
+"""
+
+
+async def renew_lease(session: AsyncSession, *, scan_id: Any, worker_id: str) -> bool:
+    """Extend this worker's claim. False means the claim is no longer ours."""
+    row = (
+        await session.execute(
+            text(_RENEW_SQL).bindparams(scan_id=scan_id, worker_id=worker_id)
+        )
+    ).first()
+    await session.commit()
+    return row is not None

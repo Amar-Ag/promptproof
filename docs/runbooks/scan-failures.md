@@ -229,3 +229,27 @@ That run also exposed something the issue had not asked about: the partial scan 
 headline was indefensible — "this target resisted everything", over a scan that never attempted
 nine-tenths of the corpus. The caveat was recorded on the scan, but nobody reads a caveat
 before a letter. A scan that does not cover the corpus now carries no grade.
+
+### 2026-11-12 — making scans slower broke the lease
+
+Pacing was measured and working before anyone noticed what it implied for the queue.
+
+`scans.locked_at` is written once, at claim time, and never renewed. A scan that runs longer
+than `SCAN_LEASE_SECONDS` is therefore indistinguishable from one whose worker died, so another
+worker claims it and runs it again. Duplicate findings, and duplicate spend against the exact
+provider allowance pacing exists to protect — the change would have traded a third of a report
+being undetermined for the whole report being run twice.
+
+It had always been possible and had never mattered, because scans took seconds. The first
+paced full-corpus run used **234 seconds of a 300-second lease**, and that was with a judge
+model cheaper than production's. The next slightly larger corpus, or one slightly unluckier
+window, goes over.
+
+A heartbeat now renews the claim at a third of the lease while the scan runs, on its own
+session — a renewal queued behind the work it protects protects nothing. It is guarded on
+`locked_by` and `status`, so a worker that has already lost its lease cannot take the scan back
+from whoever holds it now, and a finished scan cannot be dragged back to `running`.
+
+If scans appear to run twice, check for `lease.lost` in the worker log: it means a heartbeat
+found the claim gone, which points at a renewal interval too long for the lease or a worker
+that was paused.
