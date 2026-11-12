@@ -131,4 +131,38 @@ the row IDs affected, and whether queue age recovered.
 
 | Date | How induced | Outcome |
 |---|---|---|
-| _Phase 5_ | Stop the worker with scans queued | _to be recorded_ |
+| 2026-11-12 | Worker stopped, three scans queued | **Fired and resolved correctly.** Details below. |
+
+### 2026-11-12 — first drill
+
+The worker was stopped and three scans submitted, so the queue genuinely stalled rather than
+being simulated.
+
+The alert fired **435 seconds** after the first scan was queued — the 120-second threshold
+plus the 300-second sustain window, which is what those numbers are for. It was delivered to
+both configured targets:
+
+```
+/oncall  signed=true   scan-queue-stalled  value=427.794  waiting=3
+/human   signed=false  scan-queue-stalled  value=427.794  waiting=3
+```
+
+Then the worker was restarted. The queue drained and the alert **resolved** on the next
+evaluation. Exactly two webhook deliveries were recorded in total — one alert to two targets,
+not one every fifteen seconds. That is the firing-edge behaviour working: an alert that
+repeats while the problem persists is an alert that gets muted.
+
+**What the drill changed.** Planning it exposed that the evaluator was running inside the
+worker, which cannot work: this rule exists to report that the worker has stopped picking work
+up, and an evaluator inside the worker is watching for its own death. It would have passed
+every test that did not stop the worker, and failed silently the first time it mattered. The
+evaluator now runs in the API, which outlives the worker.
+
+| Signal | Confirmed |
+|---|---|
+| Fires on a sustained breach, not a single sample | yes |
+| Does not repeat while firing | yes, 2 deliveries total |
+| Resolves when the condition clears | yes |
+| Delivered to the on-call endpoint, signed | yes |
+| Delivered to a human channel | yes |
+| Payload carries no scan content | yes |
