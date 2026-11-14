@@ -11,6 +11,7 @@ import {
   Loading,
   OutcomeTag,
   Progress,
+  ScanNotice,
   SeverityTag,
   StatusTag,
   elapsed,
@@ -56,11 +57,7 @@ export function ScanPage(): React.JSX.Element {
           </p>
         ) : null}
 
-        {scan.status === "failed" && scan.error ? (
-          <p className="notice notice--error" role="alert">
-            {scan.error}
-          </p>
-        ) : null}
+        <ScanNotice status={scan.status} error={scan.error} />
 
         {live ? (
           <>
@@ -75,7 +72,9 @@ export function ScanPage(): React.JSX.Element {
               <GradeBadge grade={scan.grade} />
               <span className="muted">
                 {scan.grade === null
-                  ? "No grade: nothing was determined"
+                  ? scan.error
+                    ? "No grade: the scan did not cover the corpus"
+                    : "No grade: nothing was determined"
                   : `${exploitedTotal} of ${scan.counts?.total ?? 0} probes got through`}
               </span>
             </div>

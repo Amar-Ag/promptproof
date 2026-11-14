@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-import { GradeBadge, InertText, OutcomeTag, StatusTag } from "./States";
+import { GradeBadge, InertText, OutcomeTag, ScanNotice, StatusTag } from "./States";
 
 describe("InertText", () => {
   // Findings contain attacker-authored payloads and raw model output. One whole
@@ -69,5 +69,39 @@ describe("GradeBadge", () => {
   it("labels the grade for assistive technology", () => {
     render(<GradeBadge grade="F" />);
     expect(screen.getByLabelText("Grade F")).toHaveTextContent("F");
+  });
+});
+
+describe("ScanNotice", () => {
+  // A scan cut short by a spent provider allowance *completes*: real findings,
+  // no grade. The earlier version only rendered this on a failed scan, so that
+  // reader saw a blank grade and no reason for it. #32.
+  it("shows the caveat on a completed scan that did not cover the corpus", () => {
+    render(
+      <ScanNotice
+        status="completed"
+        error="Provider daily allowance exhausted partway through: only 4 of 42 probes ran."
+      />,
+    );
+    expect(screen.getByRole("status")).toHaveTextContent("only 4 of 42 probes ran");
+  });
+
+  it("shows a failed scan's reason as an alert", () => {
+    render(<ScanNotice status="failed" error="Target no longer exists" />);
+    expect(screen.getByRole("alert")).toHaveTextContent("Target no longer exists");
+  });
+
+  it("renders nothing when there is no caveat", () => {
+    const { container } = render(<ScanNotice status="completed" error={null} />);
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it("renders the caveat as text, never as markup", () => {
+    // It is written by us today, but it travels the same path as model output
+    // and one suite of probes is about exfiltration through rendered markup.
+    const hostile = '<img src=x onerror="window.stolen=1">';
+    const { container } = render(<ScanNotice status="completed" error={hostile} />);
+    expect(screen.getByText(hostile)).toBeInTheDocument();
+    expect(container.querySelector("img")).toBeNull();
   });
 });

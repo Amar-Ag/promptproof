@@ -36,8 +36,37 @@ class Settings(BaseSettings):
     model_max_retries: int = Field(default=3, ge=0, le=10)
 
     # ── Scan execution ────────────────────────────────────────────────────────
-    scan_concurrency: int = Field(default=4, ge=1, le=64)
+    # Measured, not guessed. On the free tier each model allows 8,000 tokens
+    # per minute, and a probe costs two calls against two different models:
+    # about 140 tokens to the target and about 410 to the judge, the judge
+    # being the more expensive because it reasons about the exchange.
+    #
+    # The judge is therefore the binding constraint at roughly 8000/410 ~= 19
+    # probes per minute. Two probes in flight, each taking a few seconds, sits
+    # under that; the previous default of 4 put up to eight calls in the air at
+    # once and overran the per-minute allowance in bursts, which is how a third
+    # of a scan's probes came back errored (#32).
+    #
+    # This is a floor rather than the whole answer. `TokenBudget` in
+    # `provider.py` paces against the allowance the provider reports on every
+    # response, so the right rate is discovered at run time for whatever
+    # account, model and corpus are actually in use. The constant only has to
+    # be low enough not to overshoot before the first response arrives.
+    scan_concurrency: int = Field(default=2, ge=1, le=64)
     scan_lease_seconds: int = Field(default=300, ge=30)
+    # Pacing bounds. Both were constants in `provider.py`, which sat badly with
+    # the argument for pacing in the first place: the right numbers depend on
+    # the account, and an account is configuration.
+    #
+    # The floor is roughly three judge calls, so a call is held back while
+    # there is still room for the ones already in flight -- they are not yet
+    # counted in the number the provider gave us.
+    pacing_floor_tokens: int = Field(default=1500, ge=0)
+    # Capped below the lease on purpose. A provider reporting an eight-hour
+    # reset must not park a worker for eight hours, and a wait longer than the
+    # lease would hand the scan to someone else mid-sleep.
+    pacing_max_wait_seconds: float = Field(default=65.0, gt=0)
+
     scan_max_attempts: int = Field(default=3, ge=1, le=10)
     worker_poll_seconds: float = Field(default=2.0, gt=0)
     worker_id: str = "worker-1"

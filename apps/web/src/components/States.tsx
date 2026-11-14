@@ -129,3 +129,31 @@ export function elapsed(from: string, to: string | null): string {
   const minutes = Math.floor(seconds / 60);
   return `${minutes}m ${seconds % 60}s`;
 }
+
+/**
+ * The scan-level caveat, shown whenever there is one.
+ *
+ * Not only on a failed scan. A scan cut short by a spent provider allowance
+ * *completes*: it has real findings and no grade, and without this the reader
+ * is left with a blank grade and no reason for it. That is the condition #32
+ * asked to be reported once, at scan level, instead of as N identical errored
+ * findings.
+ */
+export function ScanNotice({
+  status,
+  error,
+}: {
+  status: ScanStatus;
+  error: string | null;
+}): React.JSX.Element | null {
+  if (!error) return null;
+  const failed = status === "failed";
+  return (
+    <p
+      className={failed ? "notice notice--error" : "notice notice--warn"}
+      role={failed ? "alert" : "status"}
+    >
+      {error}
+    </p>
+  );
+}

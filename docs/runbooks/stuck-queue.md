@@ -52,6 +52,22 @@ SELECT id, locked_by, attempts,
 Rows returned → cause is **D2 (stale lease)**. This is the common case: a worker died
 mid-scan.
 
+**3a. Is the queue simply paced rather than stuck?**
+
+Since scans are paced against the provider's reported allowance, a full-corpus scan takes
+minutes rather than seconds, and scans behind it wait that long in `pending`. Two or three
+queued scans can therefore hold `oldest_age_seconds` above the threshold without anything being
+wrong.
+
+```bash
+docker compose logs worker | grep provider.pacing | tail
+```
+
+Recent `provider.pacing` lines, a worker claiming normally, and a `running` scan whose findings
+are still accumulating mean the queue is moving at the rate the provider allows. Nothing to do;
+the alert is reporting a slow provider, not a stuck system. If this becomes routine rather than
+occasional, the answer is a larger allowance, not a change here.
+
 **4. Is the worker claiming but failing to progress?**
 
 Open the trace for the oldest stuck scan and compare `queue.wait_ms` on `scan.claim` against

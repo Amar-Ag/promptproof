@@ -18,8 +18,14 @@ import signal
 import sys
 import time
 from datetime import UTC, datetime
+from typing import Any
 
-from promptproof_core.db import dispose_engine, get_sessionmaker, init_engine
+from promptproof_core.db import (
+    dispose_engine,
+    get_sessionmaker,
+    init_engine,
+    session_scope,
+)
 from promptproof_core.grading import grade_findings
 from promptproof_core.logging import bind_scan, clear_context, configure_logging, get_logger
 from promptproof_core.metrics import (
@@ -32,8 +38,18 @@ from promptproof_core.metrics import (
 )
 from promptproof_core.models import Finding, Scan, Target
 from promptproof_core.probes import Probe, get_corpus
-from promptproof_core.provider import GroqClient, ModelClient, build_client
-from promptproof_core.queue import claim_next_scan, fail_exhausted_scans, queue_stats
+from promptproof_core.provider import (
+    GroqClient,
+    ModelClient,
+    ProviderQuotaExhausted,
+    build_client,
+)
+from promptproof_core.queue import (
+    claim_next_scan,
+    fail_exhausted_scans,
+    queue_stats,
+    renew_lease,
+)
 from promptproof_core.settings import Settings, get_settings
 from promptproof_core.telemetry import (
     configure_telemetry,
@@ -113,6 +129,18 @@ async def _record(
     )
 
 
+QUOTA_EXHAUSTED_REASON = (
+    "Provider daily allowance exhausted before the scan could finish. "
+    "No verdict was produced. Re-run once the allowance resets."
+)
+
+QUOTA_PARTIAL_REASON = (
+    "Provider daily allowance exhausted partway through: only {done} of {total} "
+    "probes ran. The findings below are genuine, but the target was not fully "
+    "tested, so no grade is given. Re-run once the allowance resets."
+)
+
+
 async def _run_probes(
     session: AsyncSession,
     scan: Scan,
@@ -120,12 +148,30 @@ async def _run_probes(
     probes: tuple[Probe, ...],
     settings: Settings,
     client: ModelClient,
-) -> None:
-    """Execute probes with at most `scan_concurrency` in flight."""
-    semaphore = asyncio.Semaphore(settings.scan_concurrency)
+) -> bool:
+    """Execute probes with at most `scan_concurrency` in flight.
 
-    async def one(probe: Probe) -> tuple[Probe, ProbeResult]:
+    Returns whether the provider's daily allowance ran out partway through.
+
+    A failing probe never fails the scan -- except for this one condition. When
+    the day's allowance is spent, every remaining probe would fail identically,
+    and letting them try produces a report whose probes are a third
+    `errored` for a reason that has nothing to do with the target. Worse, each
+    futile attempt spends from the requests-per-day allowance as well. So the
+    first probe to hit it stops the ones that have not started, and the scan
+    reports the condition once.
+    """
+    semaphore = asyncio.Semaphore(settings.scan_concurrency)
+    quota_spent = asyncio.Event()
+
+    async def one(probe: Probe) -> tuple[Probe, ProbeResult] | None:
+        if quota_spent.is_set():
+            # Not started, so not recorded: an unattempted probe is absent from
+            # the report rather than present as a failure it never had.
+            return None
         async with semaphore:
+            if quota_spent.is_set():
+                return None
             try:
                 with span(
                     "probe.execute",
@@ -144,6 +190,21 @@ async def _run_probes(
                     )
                     set_attributes(**{"finding.outcome": result.outcome})
                     return probe, result
+            except ProviderQuotaExhausted:
+                # The one failure that is about the account rather than the
+                # target. Recorded once, at scan level, by the caller.
+                if not quota_spent.is_set():
+                    log.error(
+                        "scan.quota_exhausted",
+                        probe_id=probe.id,
+                        # What was asked for, not what is left: the count of
+                        # unfinished probes is not knowable here without racing
+                        # the tasks still resolving. `scan.partial` reports the
+                        # graded total once they have all settled.
+                        probes_requested=len(probes),
+                    )
+                    quota_spent.set()
+                return None
             except Exception as exc:  # a probe never fails the scan
                 log.warning(
                     "probe.errored",
@@ -156,38 +217,68 @@ async def _run_probes(
                 )
 
     for coro in asyncio.as_completed([one(p) for p in probes]):
-        probe, result = await coro
+        outcome = await coro
+        if outcome is None:
+            continue
+        probe, result = outcome
         await _record(session, scan.id, probe, result)
         # Committed as each probe resolves, so the UI can show partial results
         # while the scan is still running (R-003-2).
         await session.commit()
 
+    return quota_spent.is_set()
 
-async def _complete(session: AsyncSession, scan: Scan) -> None:
-    """Grade and close the scan in one transaction."""
+
+async def _complete(
+    session: AsyncSession, scan: Scan, incomplete_reason: str | None = None
+) -> None:
+    """Grade and close the scan in one transaction.
+
+    `incomplete_reason` marks a scan that finished with findings but did not
+    cover every probe it was asked to. It is recorded on the scan rather than
+    spread across absent findings, so a reader can tell "this target passed
+    everything" from "this is as far as the day's allowance got".
+
+    Such a scan gets **no grade**. A live drill produced grade `A` from four of
+    forty-two probes, because the four that ran all resisted: a headline saying
+    the target resisted everything, over a scan that never tried nine-tenths of
+    the corpus. The caveat was recorded, but nobody reads a caveat before a
+    letter. A grade asserts coverage it did not have, so there is none.
+    """
     findings = list(
         (await session.scalars(select(Finding).where(Finding.scan_id == scan.id))).all()
     )
     grade, counts = grade_findings(findings)
 
-    scan.grade = grade
+    # No grade on a scan that did not cover the corpus: see above.
+    scan.grade = None if incomplete_reason else grade
     scan.counts = counts.to_json()
     scan.finished_at = datetime.now(UTC)
     scan.status = "completed"
+    # Set on a completed scan deliberately: the findings it does have are
+    # genuine and worth showing, and the caveat belongs beside them.
+    scan.error = incomplete_reason
     scan.locked_at = None
     scan.locked_by = None
     await session.commit()
 
     # Measured from submission, not from claim: the queue wait is part of what
     # the person waited through.
+    # `scan.grade`, not `grade`: a scan that did not cover the corpus is stored
+    # with no grade, and a metric reporting the arithmetic result anyway would
+    # count uncovered scans as As on any grade-distribution dashboard -- and
+    # contradict the row a responder is told to read.
     record_scan_completed(
-        "completed", grade, int((scan.finished_at - scan.queued_at).total_seconds() * 1000)
+        "completed",
+        scan.grade,
+        int((scan.finished_at - scan.queued_at).total_seconds() * 1000),
     )
 
     log.info(
         "scan.completed",
         scan_id=str(scan.id),
-        grade=grade,
+        grade=scan.grade,
+        graded=scan.grade is not None,
         total=counts.total,
         errored=counts.errored,
     )
@@ -205,6 +296,49 @@ async def _fail(session: AsyncSession, scan: Scan, reason: str) -> None:
         "failed", None, int((scan.finished_at - scan.queued_at).total_seconds() * 1000)
     )
     log.error("scan.failed", scan_id=str(scan.id), reason=reason)
+
+
+async def _hold_lease(scan_id: Any, settings: Settings, stop: asyncio.Event) -> None:
+    """Keep this worker's claim alive while the scan is still running.
+
+    `locked_at` is written once, at claim time. A scan that outlives its lease
+    is indistinguishable from one whose worker died, so another worker claims
+    it and runs it again -- duplicate findings, and duplicate spend against the
+    provider allowance that pacing exists to protect.
+
+    That stopped being theoretical when scans began waiting out rate-limit
+    windows deliberately: a full-corpus scan now takes minutes, and a single
+    paced wait can be a minute of it. The first measured run used 234 seconds
+    of a 300-second lease, with a cheaper judge than production uses.
+
+    Renewed at a third of the lease, so two consecutive failures still leave a
+    full period of slack. Runs on its own session: the scan's session is busy
+    committing findings, and a heartbeat that queues behind the work it is
+    meant to protect protects nothing.
+    """
+    interval = max(settings.scan_lease_seconds / 3.0, 5.0)
+    while not stop.is_set():
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval)
+            return  # stopped: the scan finished
+        except TimeoutError:
+            pass
+
+        try:
+            async with session_scope() as session:
+                held = await renew_lease(session, scan_id=scan_id, worker_id=settings.worker_id)
+        except Exception as exc:
+            # A failed renewal is not fatal on its own: there is slack, and the
+            # next one may succeed. Logged because a run of them is not.
+            log.warning("lease.renew_failed", reason=type(exc).__name__)
+            continue
+
+        if not held:
+            # Someone else holds this scan now, or it has already been resolved.
+            # Carrying on would duplicate work; the scan itself is left alone
+            # rather than torn down, since whoever holds it now is running it.
+            log.warning("lease.lost", scan_id=str(scan_id))
+            return
 
 
 async def _process(
@@ -225,7 +359,13 @@ async def _process(
                 "scan.concurrency": settings.scan_concurrency,
             },
         ):
-            await _execute(session, scan, settings, client)
+            stop = asyncio.Event()
+            keepalive = asyncio.create_task(_hold_lease(scan.id, settings, stop))
+            try:
+                await _execute(session, scan, settings, client)
+            finally:
+                stop.set()
+                await keepalive
     finally:
         clear_context()
 
@@ -255,9 +395,29 @@ async def _execute(
         probe_count=len(probes),
         resuming=len(done),
     )
-    await _run_probes(session, scan, target, pending, settings, client)
-    await _complete(session, scan)
-    set_attributes(**{"scan.grade": scan.grade or "none"})
+    quota_spent = await _run_probes(session, scan, target, pending, settings, client)
+
+    if quota_spent:
+        resolved = await _already_resolved(session, scan.id)
+        if not resolved:
+            # Nothing to grade, and the cause is the account rather than the
+            # target. One honest scan-level failure beats a report of
+            # identical errors that look like findings about the target.
+            await _fail(session, scan, QUOTA_EXHAUSTED_REASON)
+            set_attributes(**{"scan.quota_exhausted": True})
+            return
+        log.warning(
+            "scan.partial",
+            reason="provider daily allowance exhausted",
+            graded=len(resolved),
+            requested=len(probes),
+        )
+        incomplete = QUOTA_PARTIAL_REASON.format(done=len(resolved), total=len(probes))
+    else:
+        incomplete = None
+
+    await _complete(session, scan, incomplete_reason=incomplete)
+    set_attributes(**{"scan.grade": scan.grade or "none", "scan.quota_exhausted": quota_spent})
 
 
 async def _loop(settings: Settings, client: ModelClient) -> None:
