@@ -73,6 +73,11 @@ services:
       # leaving a written trail.
       - key: ONCALL_GITHUB_TOKEN
         sync: false
+      # Unset, the deployed service creates spans and exports nothing. Set it
+      # in the dashboard to send this environment's telemetry to Logfire; the
+      # local stack (`make obs-up`) is the path that needs no account.
+      - key: LOGFIRE_TOKEN
+        sync: false
 
   # ── Production ─────────────────────────────────────────────────────────────
   - type: web
@@ -129,4 +134,9 @@ services:
       # diagnoses and remediates, but logs `oncall.issue_skipped` instead of
       # leaving a written trail.
       - key: ONCALL_GITHUB_TOKEN
+        sync: false
+      # Unset, the deployed service creates spans and exports nothing. Set it
+      # in the dashboard to send this environment's telemetry to Logfire; the
+      # local stack (`make obs-up`) is the path that needs no account.
+      - key: LOGFIRE_TOKEN
         sync: false

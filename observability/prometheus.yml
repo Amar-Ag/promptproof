@@ -1,0 +1,14 @@
+# Prometheus scrapes the collector, not the application.
+#
+# The application pushes OTLP and has no /metrics endpoint of its own, so the
+# collector is what re-exposes the metrics in a form Prometheus understands.
+# One place to point at, and the app stays unaware of which backend is running.
+
+global:
+  scrape_interval: 10s
+  evaluation_interval: 10s
+
+scrape_configs:
+  - job_name: promptproof
+    static_configs:
+      - targets: ["otel-collector:8889"]

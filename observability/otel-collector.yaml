@@ -1,0 +1,51 @@
+# The collector for the local telemetry stack.
+#
+# Exists so that someone who clones this repository can see the traces and
+# metrics the application emits without a Logfire account, an API token, or any
+# signup. The deployed environments export to Logfire instead; this is the
+# reproducible path, and it is the one a reviewer will take.
+#
+# Traces go to Tempo. Metrics are re-exposed in Prometheus format for
+# Prometheus to scrape, rather than pushed, because that is the shape
+# Prometheus wants and it keeps the collector the only thing the application
+# has to know about.
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+processors:
+  batch:
+    # Short, because this stack is for watching a scan you just started. A
+    # production batch window would be seconds; here it would just look broken.
+    timeout: 1s
+
+exporters:
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    # Without this, OTel resource attributes (service.name, service.version)
+    # are dropped and every series looks like it came from nowhere.
+    resource_to_telemetry_conversion:
+      enabled: true
+
+service:
+  telemetry:
+    logs:
+      level: warn
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp/tempo]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [prometheus]

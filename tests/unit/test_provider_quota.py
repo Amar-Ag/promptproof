@@ -394,7 +394,7 @@ class TestPacing:
                     headers={
                         "retry-after": "0",
                         "x-ratelimit-remaining-tokens": "12",
-                        "x-ratelimit-reset-tokens": "40ms",
+                        "x-ratelimit-reset-tokens": "1s",
                     },
                 )
             served.append("200")
@@ -415,10 +415,17 @@ class TestPacing:
 
         assert completion.text == "ok"
         assert served == ["429", "200"]
-        # The retry had to wait out the 40ms window the refusal reported. With
-        # `retry-after: 0` the backoff contributes nothing, so any wait here is
+        # The retry had to wait out the window the refusal reported. With
+        # `retry-after: 0` the backoff contributes nothing, so a wait here is
         # the pacing having read the headers off the 429.
-        assert elapsed >= 0.04, (
+        #
+        # The window is a second, and the bar is half of it. An earlier version
+        # used 40ms and failed intermittently for a sound reason: if the window
+        # elapses before the retry reaches the gate, no wait is *needed*, and
+        # the test was failing on correct behaviour. A window far longer than
+        # the work between the two removes the race without weakening the
+        # assertion.
+        assert elapsed >= 0.5, (
             f"the retry went out after {elapsed:.3f}s, so the allowance "
             "reported on the refusal was never recorded"
         )

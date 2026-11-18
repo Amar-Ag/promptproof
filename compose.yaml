@@ -140,6 +140,69 @@ services:
       db:
         condition: service_healthy
 
+  # ── Local telemetry stack ───────────────────────────────────────────────────
+  #
+  # Behind the `telemetry` profile, so `make up` is unchanged and nobody pays
+  # four containers for a stack they did not ask for. `make obs-up` starts it.
+  #
+  # It exists because the deployed environments export to Logfire, which needs
+  # an account and a token. Anyone cloning this repository to look at it has
+  # neither, and "the signals are viewable in a UI" should not depend on
+  # credentials only the author holds. This is the reproducible path.
+
+  otel-collector:
+    profiles: ["telemetry"]
+    image: otel/opentelemetry-collector-contrib:0.111.0
+    command: ["--config=/etc/otel/config.yaml"]
+    volumes:
+      - ./observability/otel-collector.yaml:/etc/otel/config.yaml:ro
+    ports:
+      # Published so an app run from the host (not in Compose) can export here
+      # too, which is how the worker is usually debugged.
+      - "${OTLP_HTTP_PORT:-4318}:4318"
+    depends_on:
+      - tempo
+
+  tempo:
+    profiles: ["telemetry"]
+    image: grafana/tempo:2.6.0
+    command: ["-config.file=/etc/tempo/config.yaml"]
+    volumes:
+      - ./observability/tempo.yaml:/etc/tempo/config.yaml:ro
+      - tempo_data:/var/tempo
+    user: root
+
+  prometheus:
+    profiles: ["telemetry"]
+    image: prom/prometheus:v2.54.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=2h
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "${PROMETHEUS_PORT:-9091}:9090"
+
+  grafana:
+    profiles: ["telemetry"]
+    image: grafana/grafana:11.2.0
+    environment:
+      # No login. A reviewer with twenty minutes should not meet a password
+      # prompt on a stack that holds nothing but their own test traces.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_FEATURE_TOGGLES_ENABLE: traceqlEditor
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "${GRAFANA_PORT:-3001}:3000"
+    depends_on:
+      - prometheus
+      - tempo
+
 volumes:
   pgdata:
   web_node_modules:
+  tempo_data:

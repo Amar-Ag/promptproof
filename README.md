@@ -2,7 +2,7 @@
 
 **Adversarial testing for LLM system prompts.** Point it at a system prompt or at your own LLM app's HTTP endpoint, and it runs a battery of prompt-injection and jailbreak probes against it, then reports which attacks got through, how severe each one is, and what to change.
 
-> Status: in development. See [docs/specs](docs/specs) for the specification this is being built against, and the project board for current work.
+> See [docs/specs](docs/specs) for the specification this is built against, and the [project board](https://github.com/Amar-Ag/promptproof/issues) for what is open.
 
 ---
 
@@ -115,7 +115,15 @@ Rollback procedure: [docs/runbooks/rollback.md](docs/runbooks/rollback.md).
 
 ## Observability and on-call
 
-The scan journey is instrumented with OpenTelemetry — metrics, traces and structured logs sharing one trace ID — exported to Logfire. An alert fires on user-visible impact (scans stuck in the queue beyond their SLO, or an elevated scan failure rate) rather than on infrastructure noise, and triggers an **on-call agent**: a PydanticAI agent that reads the relevant telemetry, works through [the runbook](docs/runbooks), applies the safe remediation it is authorised for, and files an issue documenting what it found and did.
+The scan journey is instrumented with OpenTelemetry — metrics, traces and structured logs sharing one trace ID.
+
+**To see them, with no account and no token:**
+
+```bash
+make obs-up
+```
+
+That starts the app alongside an OTel collector, Tempo, Prometheus and Grafana, and points the API and worker at the collector. Grafana is on <http://localhost:3001> with no login: the **Scan journey** dashboard is provisioned, and traces are under *Explore → Tempo*. Submit a scan and watch it arrive. The deployed environments export to Logfire instead, which needs a token; this path needs nothing. An alert fires on user-visible impact (scans stuck in the queue beyond their SLO, or an elevated scan failure rate) rather than on infrastructure noise, and triggers an **on-call agent**: a PydanticAI agent that reads the relevant telemetry, works through [the runbook](docs/runbooks), applies the safe remediation it is authorised for, and files an issue documenting what it found and did.
 
 ## Documentation
 
