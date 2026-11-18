@@ -131,14 +131,15 @@ def _build_exporter(settings: Settings) -> Any:
     except ImportError:  # pragma: no cover - the dependency is declared
         return None
 
+    # Same precedence as traces, for the same reason: see telemetry.py.
+    if settings.otel_exporter_otlp_endpoint:
+        return OTLPMetricExporter(
+            endpoint=f"{settings.otel_exporter_otlp_endpoint.rstrip('/')}/v1/metrics"
+        )
     if settings.logfire_token:
         return OTLPMetricExporter(
             endpoint="https://logfire-api.pydantic.dev/v1/metrics",
             headers={"Authorization": settings.logfire_token},
-        )
-    if settings.otel_exporter_otlp_endpoint:
-        return OTLPMetricExporter(
-            endpoint=f"{settings.otel_exporter_otlp_endpoint.rstrip('/')}/v1/metrics"
         )
     return None
 

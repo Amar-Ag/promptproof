@@ -78,14 +78,22 @@ def _build_exporter(settings: Settings) -> Any:
     except ImportError:  # pragma: no cover - the dependency is declared
         return None
 
+    # An explicitly configured endpoint wins over the Logfire token.
+    #
+    # The token is ambient credentials, usually sitting in a `.env` from months
+    # ago. The endpoint is a deliberate instruction: someone has stood up a
+    # collector and pointed this process at it. Checking the token first meant
+    # that starting the local telemetry stack did nothing visible for anyone
+    # who happened to have a token configured, which is the one case where the
+    # local stack matters most.
+    if settings.otel_exporter_otlp_endpoint:
+        return OTLPSpanExporter(
+            endpoint=f"{settings.otel_exporter_otlp_endpoint.rstrip('/')}/v1/traces"
+        )
     if settings.logfire_token:
         return OTLPSpanExporter(
             endpoint=f"{LOGFIRE_ENDPOINT}/v1/traces",
             headers={"Authorization": settings.logfire_token},
-        )
-    if settings.otel_exporter_otlp_endpoint:
-        return OTLPSpanExporter(
-            endpoint=f"{settings.otel_exporter_otlp_endpoint.rstrip('/')}/v1/traces"
         )
     return None
 

@@ -21,7 +21,7 @@ TESTS_X := $(COMPOSE) --profile test run --build --rm --no-deps tests
 export MSYS_NO_PATHCONV := 1
 
 .DEFAULT_GOAL := help
-.PHONY: help up down reset logs ps shell psql test test-unit test-integration test-web \
+.PHONY: help up obs-up obs-down down reset logs ps shell psql test test-unit test-integration test-web \
         e2e lint fmt migrate migration lock web-lock
 
 help: ## Show this help
@@ -36,6 +36,23 @@ up: ## Build and start the full system, apply migrations, wait until ready
 	@echo "  UI       http://localhost:$${WEB_PORT:-5173}"
 	@echo "  API docs http://localhost:$${API_PORT:-8000}/docs"
 	@echo ""
+
+obs-up: ## Start the app with the local telemetry stack (Grafana, Tempo, Prometheus)
+	OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318 \
+	  $(COMPOSE) --profile telemetry up --build --wait --wait-timeout 300
+	@echo ""
+	@echo "  Grafana     http://localhost:$${GRAFANA_PORT:-3001}  (no login)"
+	@echo "    dashboard  -> Dashboards > promptproof > Scan journey"
+	@echo "    traces     -> Explore > Tempo > service.name = promptproof-api"
+	@echo "  Prometheus  http://localhost:$${PROMETHEUS_PORT:-9091}"
+	@echo "  UI          http://localhost:$${WEB_PORT:-5173}"
+	@echo ""
+	@echo "  Run a scan in the UI, then watch it arrive. Metrics take one"
+	@echo "  10-second scrape to appear; traces are immediate."
+	@echo ""
+
+obs-down: ## Stop the telemetry stack and the app
+	$(COMPOSE) --profile telemetry down
 
 down: ## Stop everything, keep the data
 	$(COMPOSE) down

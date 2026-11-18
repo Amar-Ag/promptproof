@@ -1,0 +1,23 @@
+# Provisioned from this file so there is no click-path to reproduce: Grafana
+# comes up already knowing where the traces and metrics are.
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: promptproof-prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+
+  - name: Tempo
+    type: tempo
+    uid: promptproof-tempo
+    access: proxy
+    url: http://tempo:3200
+    jsonData:
+      # A trace id in a log line is only useful if it is one click from the
+      # trace. This wires that link up.
+      tracesToLogsV2:
+        datasourceUid: promptproof-prometheus

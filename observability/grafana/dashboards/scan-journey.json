@@ -1,0 +1,135 @@
+{
+  "uid": "promptproof-scan-journey",
+  "title": "Scan journey",
+  "tags": ["promptproof"],
+  "timezone": "browser",
+  "editable": true,
+  "schemaVersion": 39,
+  "refresh": "10s",
+  "time": { "from": "now-30m", "to": "now" },
+  "panels": [
+    {
+      "type": "text",
+      "title": "What this is",
+      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 0 },
+      "options": {
+        "mode": "markdown",
+        "content": "The user-visible part of a scan: how deep the queue is, how long the oldest waiting scan has waited, and where probe time goes. These are the signals the two alert rules in `packages/core/src/promptproof_core/alerts.py` are defined on.\n\nFor traces, open **Explore → Tempo** and search by service `promptproof-api` or `promptproof-worker`. Every span carries the trace id that appears in the structured logs (`docker compose logs api`), so a log line and its trace are one click apart."
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Queue depth",
+      "description": "Pending and running scans. The alert fires on the age of the oldest pending scan, not on this.",
+      "datasource": { "type": "prometheus", "uid": "promptproof-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "fillOpacity": 10 } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "promptproof_queue_depth",
+          "legendFormat": "{{status}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Oldest pending scan",
+      "description": "Someone is watching this number. scan-queue-stalled fires when it stays above 120s for five minutes.",
+      "datasource": { "type": "prometheus", "uid": "promptproof-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "fillOpacity": 10 },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 120 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "promptproof_queue_oldest_age_seconds",
+          "legendFormat": "oldest pending"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Scans submitted and completed",
+      "datasource": { "type": "prometheus", "uid": "promptproof-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "fillOpacity": 10 } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(promptproof_scans_submitted_total[5m]))",
+          "legendFormat": "submitted/s"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (outcome) (rate(promptproof_scans_completed_total[5m]))",
+          "legendFormat": "{{outcome}}/s"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Probe duration",
+      "description": "Two model calls per probe. When this climbs, the queue age follows.",
+      "datasource": { "type": "prometheus", "uid": "promptproof-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "fieldConfig": {
+        "defaults": { "unit": "ms", "custom": { "fillOpacity": 10 } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(promptproof_probe_duration_milliseconds_bucket[5m])))",
+          "legendFormat": "p95"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(promptproof_probe_duration_milliseconds_bucket[5m])))",
+          "legendFormat": "p50"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Provider errors by reason",
+      "description": "Target and judge call failures. Reasons are a fixed vocabulary, never provider text.",
+      "datasource": { "type": "prometheus", "uid": "promptproof-prometheus" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 20 },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "fillOpacity": 10 } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (reason) (rate(promptproof_target_errors_total[5m]))",
+          "legendFormat": "target: {{reason}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (reason) (rate(promptproof_judge_errors_total[5m]))",
+          "legendFormat": "judge: {{reason}}"
+        }
+      ]
+    }
+  ]
+}

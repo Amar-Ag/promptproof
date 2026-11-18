@@ -159,9 +159,38 @@ context, and the middle segment is the trace ID.
 SELECT id, split_part(traceparent, '-', 2) AS trace_id FROM scans ORDER BY queued_at DESC LIMIT 5;
 ```
 
-Nothing here is required for the application to run. With `LOGFIRE_TOKEN`
-unset, spans are still created and context still crosses the queue — they
+Nothing here is required for the application to run. With no exporter
+configured, spans are still created and context still crosses the queue — they
 simply go nowhere, which is what the test suite runs against.
+
+## The local stack
+
+Logfire needs an account and a token, which anyone reading this repository for
+the first time does not have. `make obs-up` starts a self-contained stack
+instead, behind the `telemetry` Compose profile so it costs nothing when it is
+not wanted:
+
+| Piece | Role | Where |
+|---|---|---|
+| OTel collector | receives OTLP from api and worker | `observability/otel-collector.yaml` |
+| Tempo | stores traces | `observability/tempo.yaml` |
+| Prometheus | scrapes the collector's metrics | `observability/prometheus.yml` |
+| Grafana | shows both, no login | <http://localhost:3001> |
+
+The **Scan journey** dashboard is provisioned from
+`observability/grafana/dashboards/scan-journey.json`, so there is no click-path
+to reproduce. Traces are under *Explore → Tempo*, searchable by
+`service.name = promptproof-api` or `promptproof-worker`; the trace ID in a log
+line (`docker compose logs api`) pastes straight into the search.
+
+Metrics appear one 10-second scrape behind the event. Traces are immediate.
+
+**Which exporter wins.** An explicitly configured
+`OTEL_EXPORTER_OTLP_ENDPOINT` takes precedence over `LOGFIRE_TOKEN`. The token
+is ambient credentials, usually left in a `.env` from weeks ago; the endpoint
+means someone has just stood up a collector and pointed this process at it.
+Checking the token first meant `make obs-up` showed nothing at all to anyone
+who already had a token — the one audience the stack exists for.
 
 ## Reading the signals
 
